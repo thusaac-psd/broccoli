@@ -166,7 +166,7 @@ function validateItems(
         for (const name of itemSchema.required ?? []) {
           const field = itemSchema.properties[name];
           const value = (item as Record<string, unknown>)[name];
-          if (field?.writeOnly && (value == null || value === '')) {
+          if (field?.writeOnly && !isEntered(value)) {
             errors[[...itemPath, name].join('.')] = {
               key: 'config.validation.required',
             };
@@ -414,6 +414,27 @@ export function isClearMarker(value: unknown): boolean {
   );
 }
 
+/** The field of the marker a read shows a set secret as. */
+const SECRET_REF: keyof ApiSchemas['KeptSecret'] = '$secret';
+
+/**
+ * Whether `value` is what a read shows a set secret as, typed by the API's
+ * `KeptSecret` schema: the stored secret's ref, which a write sends back at
+ * the same item to keep it.
+ */
+export function isSecretRef(value: unknown): value is ApiSchemas['KeptSecret'] {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 1 &&
+    typeof value[SECRET_REF] === 'string'
+  );
+}
+
+/** Whether a secret field holds a value typed into the form. */
+function isEntered(value: unknown): boolean {
+  return typeof value === 'string' && value !== '';
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -449,8 +470,10 @@ export function markSaved(value: unknown, prop: JsonSchemaProperty): unknown {
 
 /**
  * `value` as a write sends it: without the saved marks, and with each
- * blank secret of a new item cleared, so the server never keeps a secret a
- * stored item of the same key held.
+ * secret of a new item that holds nothing typed (blank, or the ref of the
+ * item it was renamed from) cleared: a ref keeps a secret only at the item
+ * a read showed it on, and a stored item of the same key holds none of the
+ * new item's.
  */
 export function forWrite(
   value: unknown,
@@ -469,7 +492,7 @@ export function forWrite(
   const out: Record<string, unknown> = {};
   for (const [name, child] of Object.entries(prop.properties)) {
     const field = value[name];
-    if (child.writeOnly && inNewItem && (field == null || field === '')) {
+    if (child.writeOnly && inNewItem && !isEntered(field)) {
       out[name] = { ...CLEAR_SECRET_MARKER };
     } else if (field !== undefined) {
       out[name] = forWrite(field, child, inNewItem);
@@ -479,35 +502,6 @@ export function forWrite(
     if (name !== SAVED && !(name in prop.properties)) out[name] = field;
   }
   return out;
-}
-
-/**
- * What the form holds as saved once `written` (what [`forWrite`] sent) is
- * stored: each secret it set reads as stored (`null`), each it cleared is
- * gone, and every item of a keyed array is saved under its key.
- */
-export function afterWrite(
-  written: unknown,
-  prop: JsonSchemaProperty,
-): unknown {
-  const stored = (value: unknown, at: JsonSchemaProperty): unknown => {
-    if (Array.isArray(value)) {
-      return value.map((item) => (at.items ? stored(item, at.items) : item));
-    }
-    if (!isRecord(value) || !at.properties) return value;
-    const out: Record<string, unknown> = {};
-    for (const [name, field] of Object.entries(value)) {
-      const child = at.properties[name];
-      if (child?.writeOnly) {
-        if (isClearMarker(field)) continue;
-        out[name] = typeof field === 'string' && field !== '' ? null : field;
-      } else {
-        out[name] = child ? stored(field, child) : field;
-      }
-    }
-    return out;
-  };
-  return markSaved(stored(written, prop), prop);
 }
 
 /** `value` without the saved marks, as a plugin's slot component reads it. */

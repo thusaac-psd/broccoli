@@ -3,11 +3,11 @@ import { test } from 'node:test';
 
 import type { JsonSchema } from './types.ts';
 import {
-  afterWrite,
   defaultText,
   extractDefaults,
   forWrite,
   hasOwnDescendantValue,
+  isSecretRef,
   markSaved,
   pathSteps,
   serverFieldErrors,
@@ -240,12 +240,12 @@ const stations: JsonSchema = {
   },
 };
 
-test('a saved item keeps its secret, and a new or renamed one clears what it leaves blank', () => {
+test('a saved item sends its ref back, and a new or renamed one clears what it holds untyped', () => {
   const loaded = markSaved(
     {
       stations: [
-        { name: 'alpha', token: null },
-        { name: 'beta', token: null },
+        { name: 'alpha', token: { $secret: 'ra' } },
+        { name: 'beta', token: { $secret: 'rb' } },
       ],
     },
     stations,
@@ -256,45 +256,47 @@ test('a saved item keeps its secret, and a new or renamed one clears what it lea
       beta,
       { ...alpha, name: 'renamed' },
       { name: 'alpha', token: '' },
+      { name: 'typed', token: 'new' },
     ],
   };
   assert.deepEqual(forWrite(edited, stations), {
     stations: [
-      { name: 'beta', token: null },
+      { name: 'beta', token: { $secret: 'rb' } },
       { name: 'renamed', token: { $clear: true } },
       { name: 'alpha', token: { $clear: true } },
+      { name: 'typed', token: 'new' },
     ],
   });
+});
+
+test('a set secret reads as the marker of its ref, and nothing else does', () => {
+  assert.equal(isSecretRef({ $secret: 'r' }), true);
+  assert.equal(isSecretRef({ $secret: 'r', x: 1 }), false);
+  assert.equal(isSecretRef({ $clear: true }), false);
+  assert.equal(isSecretRef(null), false);
+  assert.equal(isSecretRef('r'), false);
 });
 
 test('a new item that requires its secret has one entered before it is saved', () => {
   const values = markSaved(
-    { stations: [{ name: 'alpha', token: null }] },
+    { stations: [{ name: 'alpha', token: { $secret: 'ra' } }] },
     stations,
   ) as { stations: Record<string, unknown>[] };
+  const [alpha] = values.stations;
   const errors = validateAll(
-    { stations: [...values.stations, { name: 'new', token: '' }] },
-    stations,
-  );
-  assert.deepEqual(Object.keys(errors), ['stations.1.token']);
-});
-
-test('once written, a set secret reads as stored and a cleared one is gone', () => {
-  const saved = afterWrite(
     {
       stations: [
-        { name: 'a', token: 'typed' },
-        { name: 'b', token: { $clear: true } },
+        alpha,
+        { name: 'new', token: '' },
+        { ...alpha, name: 'renamed' },
       ],
     },
     stations,
   );
-  assert.deepEqual(saved, {
-    stations: [
-      { name: 'a', token: null, $saved: 'a' },
-      { name: 'b', $saved: 'b' },
-    ],
-  });
+  assert.deepEqual(Object.keys(errors), [
+    'stations.1.token',
+    'stations.2.token',
+  ]);
 });
 
 test('a field path reads as its titles and its items by their key', () => {

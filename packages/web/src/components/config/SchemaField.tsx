@@ -13,6 +13,7 @@ import {
 import { Button, Input, Label, Switch } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
 import { ArrowDown, ArrowUp, Minus, Plus } from 'lucide-react';
+import { useState } from 'react';
 
 import { BlobRefField } from './BlobRefField';
 import { FieldError } from './FieldError';
@@ -30,6 +31,7 @@ import {
   defaultText,
   isClearMarker,
   isNewItem,
+  isSecretRef,
   valueText,
 } from './utils';
 
@@ -91,6 +93,15 @@ export function SchemaField({
   const { t } = useTranslation();
   const pluginText = usePluginText();
   const itemName = useItemName();
+  // The ref a stored secret read as, held while it is typed over or
+  // cleared, so emptying the input or keeping it sends the ref back again.
+  const [keptRef, setKeptRef] = useState(() =>
+    isSecretRef(value) ? value.$secret : null,
+  );
+  const shownRef = isSecretRef(value) ? value.$secret : null;
+  if (shownRef !== null && shownRef !== keptRef) setKeptRef(shownRef);
+  // Nothing typed and no ref: nothing is stored (any longer).
+  if (value == null && keptRef !== null) setKeptRef(null);
   const words = { yes: t('config.yes'), no: t('config.no') };
   const fieldId = `cfg-${path.join('-')}`;
   // A plugin can name its fields in its own translation pack.
@@ -496,13 +507,14 @@ export function SchemaField({
     }
 
     // Default: string input. A secret is never read back: a stored one
-    // reads `null`, and an empty input writes `null` again, which keeps it.
+    // reads as its ref, which an empty input writes back to keep it.
     // Clearing it sends the explicit marker.
     {
       const secret = prop.writeOnly === true;
-      // A stored secret reads `null`; one of an item added since the form
-      // loaded has no stored value, whatever its key.
-      const stored = secret && value === null && !inNewItem;
+      // A stored secret reads as its ref; one of an item added or renamed
+      // since the form loaded has no stored value, whatever it holds.
+      const stored = secret && !inNewItem && keptRef !== null;
+      const kept = stored ? { $secret: keptRef } : null;
       const clearing = secret && isClearMarker(value);
       const stringPlaceholder = clearing
         ? t('config.secretCleared')
@@ -540,7 +552,7 @@ export function SchemaField({
                 onChange={(e) =>
                   updateValue(
                     path,
-                    secret && e.target.value === '' ? null : e.target.value,
+                    secret && e.target.value === '' ? kept : e.target.value,
                   )
                 }
                 type={secret ? 'password' : undefined}
@@ -550,7 +562,7 @@ export function SchemaField({
                 maxLength={prop.maxLength}
               />
               {/* A secret its item requires is replaced, never cleared. */}
-              {stored && !required && (
+              {stored && shownRef !== null && !required && (
                 <Button
                   type="button"
                   variant="outline"
@@ -567,7 +579,7 @@ export function SchemaField({
                   variant="outline"
                   size="sm"
                   className="h-9 shrink-0"
-                  onClick={() => updateValue(path, null)}
+                  onClick={() => updateValue(path, kept)}
                 >
                   {t('config.keepSecret')}
                 </Button>

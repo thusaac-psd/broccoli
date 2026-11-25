@@ -21,7 +21,6 @@ import type {
 } from './types';
 import { useFieldProblemText } from './use-field-problem-text';
 import {
-  afterWrite,
   deepMerge,
   extractDefaults,
   forWrite,
@@ -44,7 +43,11 @@ export interface ConfigFormProps {
   scope?: ConfigScope;
   inherited?: InheritedConfig;
   getConfig: () => Promise<Record<string, unknown>>;
-  putConfig: (config: Record<string, unknown>) => Promise<{ error?: unknown }>;
+  /** Writes `config`, answering the stored config as the server shows it
+   * (each set secret its ref) or the error. */
+  putConfig: (
+    config: Record<string, unknown>,
+  ) => Promise<{ error?: unknown; config?: Record<string, unknown> }>;
   deleteConfig: () => Promise<{ error?: unknown }>;
   invalidateQueryKeys?: string[][];
 }
@@ -224,7 +227,7 @@ function ConfigFormFields({
     }
 
     const written = forWrite(payload, jsonSchema) as Record<string, unknown>;
-    const { error } = await putConfig(written);
+    const { error, config: saved } = await putConfig(written);
 
     setLoading(false);
     if (error) {
@@ -236,8 +239,10 @@ function ConfigFormFields({
         fields: Object.entries(fieldErrors),
       });
     } else {
+      // The server's answer: each secret it stores shows the ref it now
+      // holds, which the next save sends back to keep it.
       setStoredValues(
-        afterWrite(written, jsonSchema) as Record<string, unknown>,
+        markSaved(saved ?? {}, jsonSchema) as Record<string, unknown>,
       );
       setFromDefaults(false);
       setEdits(new Map());

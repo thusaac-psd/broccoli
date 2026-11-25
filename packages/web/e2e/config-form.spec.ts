@@ -108,7 +108,6 @@ test('config tabs and array items read as names, not ids', async ({ page }) => {
           plugin_id: 'print',
           namespace: 'print',
           config: { stations: [{ name: 'desk' }, { name: '' }] },
-          secrets: [],
           config_withheld: false,
           enabled: null,
           position: 0,

@@ -29,8 +29,27 @@ function stationsSchema(optional = false) {
 }
 
 /**
+ * `config` as the server answers it once stored: each token typed gets a
+ * new ref, each ref sent back stays, and each cleared one is gone.
+ */
+function storedAs(config: unknown, mint: () => string): unknown {
+  const { stations } = config as { stations: Record<string, unknown>[] };
+  return {
+    stations: stations.map(({ token, ...station }) => {
+      if (typeof token === 'string') {
+        return { ...station, token: { $secret: mint() } };
+      }
+      const kept =
+        typeof token === 'object' && token !== null && '$secret' in token;
+      return kept ? { ...station, token } : station;
+    }),
+  };
+}
+
+/**
  * The plugin-wide print settings form over a server that stores what each
- * save sends. Returns the bodies of the saves.
+ * save sends, each set token shown as its ref. Returns the bodies of the
+ * saves.
  */
 async function openStations(
   page: Page,
@@ -40,10 +59,12 @@ async function openStations(
   await mockApi(page, 'admin', { plugins: ['print'] });
   let stored: unknown = {
     stations: [
-      { name: 'alpha', token: null },
-      { name: 'beta', token: null },
+      { name: 'alpha', token: { $secret: 'ra' } },
+      { name: 'beta', token: { $secret: 'rb' } },
     ],
   };
+  let minted = 0;
+  const mint = () => `ref-${++minted}`;
   const saves: unknown[] = [];
   await page.route('**/api/v1/admin/plugins', (route) =>
     route.fulfill({
@@ -69,7 +90,6 @@ async function openStations(
           plugin_id: 'print',
           namespace: 'print',
           config: stored,
-          secrets: ['stations[0].token', 'stations[1].token'],
           enabled: null,
           position: 0,
           updated_at: '2026-01-01T00:00:00Z',
@@ -82,13 +102,12 @@ async function openStations(
     const body = route.request().postDataJSON() as { config: unknown };
     saves.push(body.config);
     if (refuse) return route.fulfill({ status: 400, json: refuse });
-    stored = body.config;
+    stored = storedAs(body.config, mint);
     return route.fulfill({
       json: {
         plugin_id: 'print',
         namespace: 'print',
-        config: body.config,
-        secrets: [],
+        config: stored,
         enabled: null,
         position: 0,
         updated_at: '2026-01-01T00:00:00Z',
@@ -102,8 +121,9 @@ async function openStations(
   return { dialog, saves };
 }
 
-// Each station's token is kept by its name, so the form saves every kept
-// token as null on the station it belongs to, wherever the station moved.
+// Each station's token is kept by the ref a read showed it as, so the form
+// sends every kept token's ref back on the station it belongs to, wherever
+// the station moved.
 test('a kept secret stays on its station through delete, add and reorder', async ({
   page,
 }) => {
@@ -113,7 +133,9 @@ test('a kept secret stays on its station through delete, add and reorder', async
   await dialog.getByRole('button', { name: 'Remove' }).first().click();
   await save.click();
   await expect.poll(() => saves.length).toBe(1);
-  expect(saves[0]).toEqual({ stations: [{ name: 'beta', token: null }] });
+  expect(saves[0]).toEqual({
+    stations: [{ name: 'beta', token: { $secret: 'rb' } }],
+  });
 
   await dialog.getByRole('button', { name: 'Add item' }).click();
   await dialog.locator('#cfg-stations-1-name').fill('gamma');
@@ -122,7 +144,7 @@ test('a kept secret stays on its station through delete, add and reorder', async
   await expect.poll(() => saves.length).toBe(2);
   expect(saves[1]).toEqual({
     stations: [
-      { name: 'beta', token: null },
+      { name: 'beta', token: { $secret: 'rb' } },
       { name: 'gamma', token: 'token-g' },
     ],
   });
@@ -130,11 +152,32 @@ test('a kept secret stays on its station through delete, add and reorder', async
   await dialog.getByRole('button', { name: 'Move up' }).nth(1).click();
   await save.click();
   await expect.poll(() => saves.length).toBe(3);
-  // Saved, gamma's token reads as stored too: kept, never sent again.
+  // Saved, gamma's token reads as the ref the server minted: kept, never
+  // sent again.
   expect(saves[2]).toEqual({
     stations: [
-      { name: 'gamma', token: null },
-      { name: 'beta', token: null },
+      { name: 'gamma', token: { $secret: 'ref-1' } },
+      { name: 'beta', token: { $secret: 'rb' } },
+    ],
+  });
+});
+
+// Typing over a stored secret and emptying the input again keeps it.
+test('an emptied secret input keeps the stored secret', async ({ page }) => {
+  const { dialog, saves } = await openStations(page);
+  const token = dialog.locator('#cfg-stations-0-token');
+  await token.fill('typed');
+  await token.fill('');
+  await expect(token).toHaveAttribute(
+    'placeholder',
+    'Leave empty to keep the stored secret',
+  );
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0]).toEqual({
+    stations: [
+      { name: 'alpha', token: { $secret: 'ra' } },
+      { name: 'beta', token: { $secret: 'rb' } },
     ],
   });
 });
@@ -160,7 +203,7 @@ test('a stored secret is cleared with its own action, which can be taken back', 
   await expect.poll(() => saves.length).toBe(1);
   expect(saves[0]).toEqual({
     stations: [
-      { name: 'alpha', token: null },
+      { name: 'alpha', token: { $secret: 'ra' } },
       { name: 'beta', token: { $clear: true } },
     ],
   });
@@ -176,7 +219,7 @@ test('typing a secret replaces a pending clear', async ({ page }) => {
   expect(saves[0]).toEqual({
     stations: [
       { name: 'alpha', token: 'token-new' },
-      { name: 'beta', token: null },
+      { name: 'beta', token: { $secret: 'rb' } },
     ],
   });
 });
@@ -238,7 +281,7 @@ test('a refused field is named by its title and its item', async ({ page }) => {
         fields: [
           {
             path: 'stations[1].token',
-            message: 'no secret is stored for this item',
+            message: 'this write never read the secret stored for this item',
             kind: 'secret_not_stored',
           },
         ],

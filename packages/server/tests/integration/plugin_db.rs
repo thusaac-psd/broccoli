@@ -378,7 +378,6 @@ mod grants {
         "hook_event",
         "hook_event_delivery",
         "idempotency_key",
-        "installation",
         "plugin",
         "plugin_config",
         "plugin_group_role",

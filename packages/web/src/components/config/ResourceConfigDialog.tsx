@@ -88,7 +88,7 @@ function buildConfigCallbacks(
           return (entry?.config ?? {}) as Record<string, unknown>;
         },
         putConfig: async (config: Record<string, unknown>) => {
-          const { error } = await apiClient.PUT(
+          const { data, error } = await apiClient.PUT(
             '/admin/plugins/{id}/config/{namespace}',
             {
               params: {
@@ -97,7 +97,7 @@ function buildConfigCallbacks(
               body: { config },
             },
           );
-          return { error };
+          return { error, config: data?.config as Record<string, unknown> };
         },
         deleteConfig: async () => {
           const { error } = await apiClient.DELETE(
@@ -129,7 +129,7 @@ function buildConfigCallbacks(
           config: Record<string, unknown>,
           enabled?: boolean | null,
         ) => {
-          const { error } = await apiClient.PUT(
+          const { data, error } = await apiClient.PUT(
             '/contests/{id}/config/{plugin_id}/{namespace}',
             {
               params: {
@@ -138,7 +138,7 @@ function buildConfigCallbacks(
               body: { config, ...(enabled !== undefined ? { enabled } : {}) },
             },
           );
-          return { error };
+          return { error, config: data?.config as Record<string, unknown> };
         },
         deleteConfig: async () => {
           const { error } = await apiClient.DELETE(
@@ -170,7 +170,7 @@ function buildConfigCallbacks(
           config: Record<string, unknown>,
           enabled?: boolean | null,
         ) => {
-          const { error } = await apiClient.PUT(
+          const { data, error } = await apiClient.PUT(
             '/problems/{id}/config/{plugin_id}/{namespace}',
             {
               params: {
@@ -179,7 +179,7 @@ function buildConfigCallbacks(
               body: { config, ...(enabled !== undefined ? { enabled } : {}) },
             },
           );
-          return { error };
+          return { error, config: data?.config as Record<string, unknown> };
         },
         deleteConfig: async () => {
           const { error } = await apiClient.DELETE(
@@ -213,7 +213,7 @@ function buildConfigCallbacks(
           return (data?.config ?? {}) as Record<string, unknown>;
         },
         putConfig: async (config: Record<string, unknown>) => {
-          const { error } = await apiClient.PUT(
+          const { data, error } = await apiClient.PUT(
             '/contests/{id}/problems/{problem_id}/config/{plugin_id}/{namespace}',
             {
               params: {
@@ -227,7 +227,7 @@ function buildConfigCallbacks(
               body: { config },
             },
           );
-          return { error };
+          return { error, config: data?.config as Record<string, unknown> };
         },
         deleteConfig: async () => {
           const { error } = await apiClient.DELETE(
@@ -776,10 +776,14 @@ function SinglePluginContent({
               cbs.putConfig as (
                 c: Record<string, unknown>,
                 e?: boolean | null,
-              ) => Promise<{ error?: unknown }>
+              ) => Promise<{
+                error?: unknown;
+                config?: Record<string, unknown>;
+              }>
             )(config, enabled);
             if (result.error) return result;
-            return propagateEnabled(ns, enabled);
+            const propagated = await propagateEnabled(ns, enabled);
+            return { ...propagated, config: result.config };
           },
         },
       ]),

@@ -278,12 +278,15 @@ pub enum FieldErrorKind {
     Pattern { pattern: String },
     /// The plugin no longer declares the config's namespace at its scope.
     NamespaceUndeclared { scope: String },
-    /// A write keeps (sends `null` for) a secret that no stored item it
-    /// names holds: a new item, or one whose key field changed. Its secret
-    /// is entered again.
+    /// A write sends no secret (`null`, the empty string, or nothing) where
+    /// one is stored, or a ref (`KeptSecret`) the stored secret at the same
+    /// item does not hold: it keeps a secret it never read, as a client that
+    /// deleted an item and added one of the same name. The secret is entered
+    /// again, or cleared.
     SecretNotStored,
-    /// A write clears (`{"$clear": true}`) a secret its item requires. The
-    /// secret is replaced with a new one instead.
+    /// A write sends no secret, or clears the stored one
+    /// (`{"$clear": true}`), where its item requires one. A secret is
+    /// entered instead.
     SecretRequired,
     /// Another item of the array already has this value in the array's key
     /// field, which names one item.
@@ -317,12 +320,10 @@ impl std::fmt::Display for FieldErrorKind {
             Self::DuplicateKey { value } => {
                 write!(f, "another item already has the key {value}")
             }
-            Self::SecretRequired => {
-                f.write_str("this secret is required: replace it instead of clearing it")
-            }
-            Self::SecretNotStored => {
-                f.write_str("no secret is stored for this item: enter it again")
-            }
+            Self::SecretRequired => f.write_str("this secret is required: enter one"),
+            Self::SecretNotStored => f.write_str(
+                "this write never read the secret stored for this item: enter it again or clear it",
+            ),
             Self::NamespaceUndeclared { scope } => write!(
                 f,
                 "the plugin no longer declares this namespace at the {scope} scope"
@@ -336,13 +337,24 @@ impl std::fmt::Display for FieldErrorKind {
 }
 
 /// What a config write sends in place of a secret field's value to clear
-/// it: `{"$clear": true}`. Sending `null`, or leaving the field out, keeps
-/// the stored secret; a string replaces it. Clients build the marker from
-/// this schema, so its shape has one source.
+/// it: `{"$clear": true}`. A string replaces the secret, and the ref a read
+/// showed (`KeptSecret`) keeps it. Clients build the marker from this
+/// schema, so its shape has one source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ClearSecret {
     #[serde(rename = "$clear")]
     pub clear: bool,
+}
+
+/// What a config read shows in place of a set secret field's value, and
+/// what a write sends back at the same item to keep the stored secret:
+/// `{"$secret": "<ref>"}`, the opaque ref the server minted when it stored
+/// that value. A ref keeps nothing on another item, or once the secret was
+/// set again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct KeptSecret {
+    #[serde(rename = "$secret")]
+    pub secret: String,
 }
 
 /// A config its plugin finds something wrong with: a stored config it would
@@ -413,6 +425,14 @@ impl IncompatibleConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_kept_secret_schema_is_the_marker_the_host_reads() {
+        assert_eq!(
+            serde_json::to_value(KeptSecret { secret: "r".into() }).unwrap(),
+            serde_json::json!({ broccoli_types::manifest::SECRET_REF: "r" })
+        );
+    }
 
     #[test]
     fn the_clear_marker_schema_is_the_marker_the_host_reads() {

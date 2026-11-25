@@ -286,43 +286,141 @@ mod unknown_schema {
     }
 }
 
-/// A stored secret is cleared only by the explicit marker
-/// `{"$clear": true}`: `null` keeps it, and a string replaces it.
-mod clear_secret {
+/// A read shows a set secret as its ref, `{"$secret": "<ref>"}`, and a
+/// write keeps the stored secret only where it sends that ref back: any
+/// other write that sends no secret where one is stored never read it, and
+/// is refused. A string sets the secret, and `{"$clear": true}` clears it.
+mod secret_ref {
     use super::*;
 
+    async fn save(
+        app: &TestApp,
+        admin: &str,
+        path: &str,
+        config: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let res = app
+            .put_with_token(path, &json!({ "config": config }), admin)
+            .await;
+        (res.status, res.body)
+    }
+
+    fn refused(body: &serde_json::Value) -> (String, String) {
+        let field = &body["details"]["fields"][0];
+        (
+            field["path"].as_str().unwrap_or_default().to_string(),
+            field["kind"].as_str().unwrap_or_default().to_string(),
+        )
+    }
+
     #[tokio::test]
-    async fn the_clear_marker_clears_a_stored_secret() {
+    async fn only_the_ref_a_read_showed_keeps_a_secret() {
         let app = TestApp::spawn_with_plugins().await;
         let admin = app
-            .create_user_with_role("clear_secret_admin", "password123", "admin")
+            .create_user_with_role("secret_ref_admin", "password123", "admin")
             .await;
         let problem_id = app.insert_public_problem("P").await;
         let path = routes::problem_config_ns(problem_id, "server-plugin", "bundled");
-        let save = |config: serde_json::Value| {
-            let (app, admin, path) = (&app, &admin, &path);
-            async move {
-                let res = app
-                    .put_with_token(path, &json!({ "config": config }), admin)
-                    .await;
-                assert_eq!(res.status, 200, "{}", res.text);
-                res.body
-            }
-        };
 
-        let saved = save(json!({ "token": "to-clear" })).await;
-        assert_eq!(saved["secrets"], json!(["token"]), "{saved}");
-        let kept = save(json!({ "token": null })).await;
-        assert_eq!(kept["secrets"], json!(["token"]), "null keeps it: {kept}");
-        let left_out = save(json!({ "from": "a file without the secret" })).await;
+        let (status, saved) = save(&app, &admin, &path, json!({ "token": "first" })).await;
+        assert_eq!(status, 200, "{saved}");
+        let first = saved["config"]["token"].clone();
+        assert!(first["$secret"].is_string(), "{saved}");
+        let read = app.get_with_token(&path, &admin).await;
+        assert_eq!(read.body["config"]["token"], first, "{}", read.text);
+
+        let (status, kept) = save(&app, &admin, &path, json!({ "token": first })).await;
+        assert_eq!(status, 200, "{kept}");
+        assert_eq!(kept["config"]["token"], first, "the echoed ref keeps it");
+
+        for (what, config) in [
+            ("null", json!({ "token": null })),
+            ("left out", json!({ "from": "a file without the secret" })),
+            ("a forged ref", json!({ "token": { "$secret": "forged" } })),
+        ] {
+            let (status, body) = save(&app, &admin, &path, config).await;
+            assert_eq!(status, 400, "{what}: {body}");
+            assert_eq!(
+                refused(&body),
+                ("token".to_string(), "secret_not_stored".to_string()),
+                "{what}: {body}"
+            );
+        }
+
+        let (status, rotated) = save(&app, &admin, &path, json!({ "token": "second" })).await;
+        assert_eq!(status, 200, "{rotated}");
+        assert_ne!(rotated["config"]["token"], first, "a new secret, a new ref");
+        let (status, body) = save(&app, &admin, &path, json!({ "token": first })).await;
         assert_eq!(
-            left_out["secrets"],
-            json!(["token"]),
-            "a write that leaves the secret out keeps it too: {left_out}"
+            status, 400,
+            "the ref of a secret set again since keeps nothing: {body}"
         );
-        let cleared = save(json!({ "token": { "$clear": true } })).await;
-        assert_eq!(cleared["secrets"], json!([]), "{cleared}");
+
+        let (status, cleared) =
+            save(&app, &admin, &path, json!({ "token": { "$clear": true } })).await;
+        assert_eq!(status, 200, "{cleared}");
         assert_eq!(cleared["config"], json!({}), "{cleared}");
+        let (status, unset) = save(&app, &admin, &path, json!({ "token": null })).await;
+        assert_eq!(
+            status, 200,
+            "with nothing stored, no secret is no secret: {unset}"
+        );
+    }
+
+    /// The print station case: an API client that deletes a station and adds
+    /// one of the same name gets no old token back, whatever it sends.
+    #[tokio::test]
+    async fn an_item_deleted_and_added_again_by_name_keeps_no_secret() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("secret_ref_readd", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "keyed");
+        let (status, saved) = save(
+            &app,
+            &admin,
+            &path,
+            json!({ "stations": [{ "name": "desk", "token": "old" }] }),
+        )
+        .await;
+        assert_eq!(status, 200, "{saved}");
+        let read = saved["config"]["stations"][0]["token"].clone();
+
+        for (what, desk) in [
+            ("null", json!({ "name": "desk", "token": null })),
+            ("left out", json!({ "name": "desk" })),
+        ] {
+            let (status, body) = save(&app, &admin, &path, json!({ "stations": [desk] })).await;
+            assert_eq!(status, 400, "{what}: {body}");
+            assert_eq!(
+                refused(&body),
+                (
+                    "stations[0].token".to_string(),
+                    "secret_required".to_string()
+                ),
+                "{what}: {body}"
+            );
+        }
+        let (status, body) = save(
+            &app,
+            &admin,
+            &path,
+            json!({ "stations": [{ "name": "renamed", "token": read }] }),
+        )
+        .await;
+        assert_eq!(status, 400, "a renamed station keeps nothing: {body}");
+        assert_eq!(refused(&body).1, "secret_not_stored", "{body}");
+
+        let (status, kept) = save(
+            &app,
+            &admin,
+            &path,
+            json!({ "stations": [{ "name": "desk", "token": read }] }),
+        )
+        .await;
+        assert_eq!(status, 200, "{kept}");
+        assert_eq!(kept["config"]["stations"][0]["token"], read);
     }
 }
 
@@ -363,9 +461,8 @@ mod required_secret {
         assert_eq!(field["kind"], "secret_required", "{}", res.text);
 
         let res = app.get_with_token(&path, &admin).await;
-        assert_eq!(
-            res.body["secrets"],
-            json!(["stations[0].token"]),
+        assert!(
+            res.body["config"]["stations"][0]["token"]["$secret"].is_string(),
             "a refused clear keeps the secret: {}",
             res.text
         );
@@ -374,7 +471,7 @@ mod required_secret {
 
 /// A save reads the stored secrets it keeps under the row's lock, so a save
 /// that keeps a secret while another rotates it waits for the rotation and
-/// keeps the new secret, never reverting it.
+/// then keeps nothing by the old ref, never reverting the rotation.
 mod concurrent_secret {
     use super::*;
     use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
@@ -391,6 +488,7 @@ mod concurrent_secret {
             .put_with_token(&path, &json!({ "config": { "token": "old" } }), &admin)
             .await;
         assert_eq!(res.status, 200, "{}", res.text);
+        let old_ref = res.body["config"]["token"].clone();
 
         // The test's own connections, beside the server's pool.
         let own = sea_orm::Database::connect(app.database.url())
@@ -400,7 +498,8 @@ mod concurrent_secret {
         let rotation = own.begin().await.unwrap();
         rotation
             .execute_unprepared(&format!(
-                "UPDATE plugin_config SET config = '{{\"token\": \"rotated\"}}' \
+                "UPDATE plugin_config SET config = '{{\"token\": \"rotated\"}}', \
+                 secret_refs = '[{{\"identity\": [{{\"field\": \"token\"}}], \"ref\": \"new\"}}]' \
                  WHERE scope = 'problem' AND ref_id = '{problem_id}' \
                  AND namespace = 'server-plugin:bundled'"
             ))
@@ -413,7 +512,7 @@ mod concurrent_secret {
                 client
                     .put(url)
                     .bearer_auth(admin)
-                    .json(&json!({ "config": { "token": null, "from": "kept" } }))
+                    .json(&json!({ "config": { "token": old_ref, "from": "kept" } }))
                     .send()
                     .await
                     .unwrap()
@@ -440,7 +539,7 @@ mod concurrent_secret {
             tokio::task::yield_now().await;
         }
         rotation.commit().await.unwrap();
-        assert_eq!(keep.await.unwrap(), 200);
+        assert_eq!(keep.await.unwrap(), 400, "the old ref keeps nothing");
 
         let stored = own
             .query_one_raw(Statement::from_string(
@@ -456,7 +555,7 @@ mod concurrent_secret {
             .unwrap()
             .try_get::<String>("", "v")
             .unwrap();
-        assert_eq!(stored, "rotated", "the save keeps the rotated token");
+        assert_eq!(stored, "rotated", "the rotated token stays");
     }
 }
 

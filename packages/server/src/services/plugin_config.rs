@@ -11,7 +11,9 @@ use broccoli_server_sdk::types::{
 };
 use plugin_core::config_schema::{self, FieldError, FieldErrorKind};
 pub(crate) use plugin_core::manifest::ConfigScope;
-use plugin_core::manifest::{ConfigNamespace, PluginManifest, SecretRefusal};
+use plugin_core::manifest::{
+    ConfigNamespace, PluginManifest, SecretRef, SecretRefusal, StoredSecrets,
+};
 use plugin_core::registry::PluginRegistry;
 use plugin_core::traits::PluginManager;
 
@@ -205,21 +207,31 @@ impl<'a> SchemaSource<'a> {
     }
 }
 
+/// The refs a stored row's `secret_refs` holds.
+pub(crate) fn secret_refs(stored: &serde_json::Value) -> Vec<SecretRef> {
+    serde_json::from_value(stored.clone()).unwrap_or_default()
+}
+
+/// A new secret's ref: opaque, and never the same twice.
+pub(crate) fn mint_secret_ref() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
 /// A stored config as a read shows it.
 pub(crate) struct Shown {
-    /// Each secret field `null`; `null` whole when `withheld`.
+    /// Each set secret field its ref (`{"$secret": "<ref>"}`); `null` whole
+    /// when `withheld`.
     pub(crate) config: serde_json::Value,
-    /// The paths of the secret fields that hold a value.
-    pub(crate) secrets: Vec<String>,
     /// No schema for the namespace is known here, so nothing of it shows.
     pub(crate) withheld: bool,
 }
 
-/// A stored config as a read shows it: each secret field its namespace
-/// declares `null`, with the paths of those that hold a value, and nothing
-/// at all when this server knows no schema for the namespace it may trust
-/// ([`SchemaSource::namespace`]), since no one here can say which of its
-/// fields are secret. Every route that answers a
+/// A stored config as a read shows it: each set secret field its namespace
+/// declares replaced by its ref in `refs`
+/// ([`ConfigNamespace::show_secrets`]), which a write sends back to keep
+/// it, and nothing at all when this server knows no schema for the
+/// namespace it may trust ([`SchemaSource::namespace`]), since no one here
+/// can say which of its fields are secret. Every route that answers a
 /// stored config builds its answer here, so a secret never leaves the
 /// server.
 pub(crate) fn shown(
@@ -227,19 +239,18 @@ pub(crate) fn shown(
     plugin_id: &str,
     namespace: &str,
     mut config: serde_json::Value,
+    refs: &[SecretRef],
 ) -> Shown {
     match schemas.namespace(plugin_id, namespace) {
         Some(ns) => {
-            let secrets = ns.withhold_secrets(&mut config);
+            ns.show_secrets(&mut config, refs);
             Shown {
                 config,
-                secrets: secrets.into_iter().map(|set| set.path).collect(),
                 withheld: false,
             }
         }
         None => Shown {
             config: serde_json::Value::Null,
-            secrets: Vec::new(),
             withheld: true,
         },
     }
@@ -264,12 +275,12 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     match row {
         Some(r) => {
             let namespace = strip_namespace_prefix(&r.namespace).to_string();
-            let shown = shown(schemas, plugin_id, &namespace, r.config);
+            let refs = secret_refs(&r.secret_refs);
+            let shown = shown(schemas, plugin_id, &namespace, r.config, &refs);
             Ok(Json(PluginConfigResponse {
                 plugin_id: plugin_id.to_string(),
                 namespace,
                 config: shown.config,
-                secrets: shown.secrets,
                 config_withheld: shown.withheld,
                 enabled: r.enabled,
                 position: r.position,
@@ -616,13 +627,13 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
 ) -> Result<(PluginConfigResponse, ConfigChange), AppError> {
     let txn = db.begin().await?;
     lock_reached(&txn, target).await?;
-    // A secret the client sends back as `null` (it reads them so) keeps what
+    // A secret the client sends back as the ref a read showed it keeps what
     // the stored config holds for the same item.
     let mut config = config;
+    let mut refs = Vec::new();
     if let Some(ns) = declared(plugins.get_registry(), plugin_id, namespace) {
         // Under the row's lock: a save that rotates a secret meanwhile is
-        // waited for, so this one keeps the new secret instead of reverting
-        // it.
+        // waited for, so this one, holding the old ref, keeps nothing.
         let stored = plugin_config::Entity::find_by_id((
             target.scope().as_str().to_string(),
             target.ref_id().to_string(),
@@ -631,7 +642,16 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
         .lock(LockType::Update)
         .one(&txn)
         .await?;
-        ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config))
+        let stored_refs = stored
+            .as_ref()
+            .map(|row| secret_refs(&row.secret_refs))
+            .unwrap_or_default();
+        let stored = StoredSecrets {
+            config: stored.as_ref().map(|row| &row.config),
+            refs: &stored_refs,
+        };
+        refs = ns
+            .keep_secrets(&mut config, stored, &mut mint_secret_ref)
             .map_err(|refused| {
                 AppError::InvalidConfig(
                     refused
@@ -654,6 +674,7 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     }
     let mut updated = vec![
         plugin_config::Column::Config,
+        plugin_config::Column::SecretRefs,
         plugin_config::Column::UpdatedAt,
     ];
     if settings.enabled.is_some() {
@@ -668,6 +689,7 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
         ref_id: Set(target.ref_id().to_string()),
         namespace: Set(target.stored_namespace(plugin_id, namespace)),
         config: Set(config),
+        secret_refs: Set(serde_json::to_value(&refs).expect("refs serialize")),
         enabled: Set(enabled),
         position: Set(position),
         updated_at: sea_orm::NotSet,
@@ -690,13 +712,13 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
         plugin_id,
         namespace,
         row.config,
+        &refs,
     );
     Ok((
         PluginConfigResponse {
             plugin_id: plugin_id.to_string(),
             namespace: strip_namespace_prefix(&row.namespace).to_string(),
             config: shown.config,
-            secrets: shown.secrets,
             config_withheld: shown.withheld,
             enabled: row.enabled,
             position: row.position,
@@ -1254,6 +1276,10 @@ mod tests {
         use crate::plugin_lifecycle::PluginLifecycle;
         let registry = registry_with_a_secret();
         let config = serde_json::json!({ "token": "t", "other": "o" });
+        let refs = [SecretRef {
+            identity: vec![plugin_core::manifest::SecretStep::Field("token".into())],
+            id: "r".into(),
+        }];
         let reporting = |status| {
             PluginLifecycle::reporting(
                 [(
@@ -1279,9 +1305,13 @@ mod tests {
             "p",
             "ns",
             config.clone(),
+            &refs,
         );
         assert!(!served.withheld);
-        assert_eq!(served.config["token"], serde_json::Value::Null);
+        assert_eq!(
+            served.config["token"],
+            serde_json::json!({ "$secret": "r" })
+        );
         assert_eq!(served.config["other"], "o");
 
         for status in [
@@ -1297,6 +1327,7 @@ mod tests {
                 "p",
                 "ns",
                 config.clone(),
+                &refs,
             );
             assert!(served.withheld, "{status:?}");
             assert_eq!(served.config, serde_json::Value::Null, "{status:?}");
