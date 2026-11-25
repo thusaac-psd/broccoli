@@ -46,9 +46,11 @@ there. The problem's config issues list the entry until the config is fixed.
   weak test drags the whole subtask down.
 
 A problem's total is the sum of its subtask scores. A problem with no
-subtask config gets one `sum` subtask named All Tests, covering every test
-case that is not a sample and is worth more than zero points, with a max
-score equal to the sum of those points.
+subtask config gets one `sum` subtask, shown as All Tests in each viewer's
+language, covering every test case that is not a sample and is worth more than
+zero points, with a max score equal to the sum of those points. It has no
+stored name: the plugin's routes give it an empty `name`, which no configured
+subtask can have.
 
 A problem none of whose subtasks can score is not judged: every submission
 to it ends as a system error that stands (`NOTHING_TO_SCORE`), as does every
@@ -130,10 +132,11 @@ A token unlocks full feedback on one submission regardless of
 `feedback_level`. A contestant spends a token on their own submission while
 the contest is running, on a submission that has been judged, and a
 submission can only be tokened once. The problem page's token panel offers a
-token for the submission it shows, or else for the newest judged submission
-of that problem not yet tokened, even when `feedback_level = "none"` hides
-whether it was judged. Once spent, the submission's result shows wherever the
-page shows the submission, with no reload.
+token for the submission it shows when that one can take a token, or else for
+the newest judged submission of that problem not yet tokened (so a submission
+still judging never hides an older one), even when `feedback_level = "none"`
+hides whether it was judged. Once spent, the submission's result shows
+wherever the app shows the submission, in every open tab, with no reload.
 
 `tokens.mode` picks the token model, and it defaults to `none`.
 

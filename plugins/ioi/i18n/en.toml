@@ -48,7 +48,7 @@
 'ioi.submission.showLess' = 'Show less'
 'ioi.submission.showAll' = 'Show all {count} tests'
 'ioi.submission.missingTestCase' = "{label} names no test case"
-'ioi.submission.subtaskFallback' = 'Subtask {index}'
+'ioi.subtask.allTests' = 'All Tests'
 'ioi.submission.tokened' = 'Tokened'
 'ioi.submission.status.Pending' = 'Pending'
 'ioi.submission.status.Running' = 'Running'

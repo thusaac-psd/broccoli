@@ -1,4 +1,5 @@
-import { expect, test } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
+import { expect, type Page, test } from '@playwright/test';
 
 import {
   cursorPage,
@@ -406,3 +407,218 @@ test('a token unlocks a hidden IOI result where the problem page shows it, witho
   await expect(page.getByText('Result hidden')).toHaveCount(0);
   await expect(page.getByText('Accepted').first()).toBeVisible();
 });
+
+/** Whether the viewer spent its token on submission 9. */
+type TokenState = { tokened: boolean };
+
+/**
+ * Serves `page` an IOI contest at feedback `subtask_scores` with one token
+ * and submission 9, whose test case rows read redacted until `state` says
+ * the token is spent on it.
+ */
+async function serveTokenAtSubtaskScores(page: Page, state: TokenState) {
+  await mockApi(page, 'contestant', { plugins: ['ioi'] });
+  const judged = {
+    ...submission(9, 2, 'Accepted'),
+    contest_id: 4,
+    contest_type: 'ioi',
+    problem_id: 1,
+    problem_title: 'Sum of Two Integers',
+  };
+  const row = {
+    id: 1,
+    test_case_id: 101,
+    label: 'a',
+    verdict: 'Accepted',
+    score: 1,
+    time_used: 37,
+    memory_used: 1024,
+    is_sample: false,
+  };
+  const IOI = '**/api/v1/p/ioi/api/plugins/ioi/contests/4';
+  await page.route(/\/api\/v1\/contests\/4\/problems$/, (route) =>
+    route.fulfill({
+      json: [
+        {
+          contest_id: 4,
+          problem_id: 1,
+          problem_title: 'Sum of Two Integers',
+          label: 'A',
+          position: 0,
+        },
+      ],
+    }),
+  );
+  await page.route(/\/api\/v1\/contests\/4\/problems\/1$/, (route) =>
+    route.fulfill({ json: { ...problem(1), default_contest_type: 'ioi' } }),
+  );
+  await page.route(/\/api\/v1\/contests\/4\/submissions(\?|$)/, (route) =>
+    route.fulfill({ json: cursorPage([judged]) }),
+  );
+  // Test case rows are redacted at subtask scores until a token unlocks them.
+  const rows = () =>
+    state.tokened
+      ? [row]
+      : [{ ...row, verdict: null, score: null, time_used: null }];
+  await page.route(/\/api\/v1\/submissions\/9(\?|$)/, (route) =>
+    route.fulfill({
+      json: {
+        ...judged,
+        files: [{ filename: 'main.cpp', content: 'int main() {}\n' }],
+        result: {
+          verdict: 'Accepted',
+          score: 100,
+          time_used: 500,
+          memory_used: 1024,
+          compile_output: null,
+          error_message: null,
+          judged_at: judged.created_at,
+          judgement_id: 1,
+          test_case_results: rows(),
+          test_case_pagination: {
+            page: 1,
+            per_page: 20,
+            total: 1,
+            total_pages: 1,
+          },
+        },
+      },
+    }),
+  );
+  await page.route(/\/api\/v1\/submissions\/9\/judgements\/1(\?|$)/, (route) =>
+    route.fulfill({
+      json: {
+        test_case_results: rows(),
+        test_case_pagination: {
+          page: 1,
+          per_page: 20,
+          total: 1,
+          total_pages: 1,
+        },
+      },
+    }),
+  );
+  await page.route(`${IOI}/info`, (route) =>
+    route.fulfill({
+      json: {
+        scoring_mode: 'max_submission',
+        feedback_level: 'subtask_scores',
+        scoreboard_visibility: 'all_contest_viewers',
+        scoreboard_tiebreaker: 'equal_rank',
+        token_mode: 'fixed_budget',
+      },
+    }),
+  );
+  const subtask = { name: 'Small', scoring_method: 'sum', max_score: 100 };
+  await page.route(`${IOI}/problems/1/config`, (route) =>
+    route.fulfill({
+      json: {
+        scoring_mode: 'max_submission',
+        feedback_level: 'subtask_scores',
+        max_score: 100,
+        subtasks: [{ ...subtask, test_cases: ['a'] }],
+        label_map: { a: 101 },
+        test_case_max_scores: { a: 1 },
+      },
+    }),
+  );
+  await page.route(`${IOI}/submissions/9/subtask-scores`, (route) =>
+    route.fulfill({
+      json: { subtasks: [{ ...subtask, score: 100 }], max_score: 100 },
+    }),
+  );
+  await page.route(`${IOI}/token-status`, (route) =>
+    route.fulfill({
+      json: {
+        mode: 'fixed_budget',
+        available: state.tokened ? 0 : 1,
+        used: state.tokened ? 1 : 0,
+        total: 1,
+        next_regen_at: null,
+        tokened_submission_ids: state.tokened ? [9] : [],
+        usable_submissions: state.tokened
+          ? []
+          : [{ submission_id: 9, problem_id: 1 }],
+      },
+    }),
+  );
+  await page.route(`${IOI}/submissions/9/token`, (route) => {
+    state.tokened = true;
+    return route.fulfill({ json: { remaining_tokens: 0 } });
+  });
+}
+
+test('a token at subtask scores shows the test case rows of the submission it unlocks', async ({
+  page,
+}, info) => {
+  test.skip(info.project.name === 'phone', 'the sidebar is a sheet there');
+  const state = { tokened: false };
+  await serveTokenAtSubtaskScores(page, state);
+  // The submission's own page shows its test case rows redacted.
+  await page.goto('/submissions/9');
+  await expect(page.getByText('Test Case #1')).toBeVisible();
+  await expect(page.getByText(/37\s?ms/)).toHaveCount(0);
+  // Spend the token on the problem's page and come back without a reload.
+  await page.getByRole('link', { name: 'View contest submissions' }).click();
+  await page.getByRole('link', { name: 'A Sum of Two Integers' }).click();
+  await page.getByRole('button', { name: 'Submit' }).click();
+  await page
+    .getByRole('button', { name: 'Use a token on submission #9' })
+    .click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(
+    page.getByRole('button', { name: 'Use a token on submission #9' }),
+  ).toHaveCount(0);
+  // Back to the submission's page inside the app, as a link would go.
+  await page.evaluate(() => {
+    window.history.pushState(null, '', '/submissions/9');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+  await expect(page.getByText('Test Case #1')).toBeVisible();
+  await expect(page.getByText(/37\s?ms/).first()).toBeVisible();
+});
+
+test('a token spent in one tab shows the result in another tab already open on it', async ({
+  page,
+}, info) => {
+  test.skip(info.project.name === 'phone', 'one check of the tabs is enough');
+  const state = { tokened: false };
+  await serveTokenAtSubtaskScores(page, state);
+  // The other tab shows the redacted rows and polls no more: the outcome
+  // it may see is final.
+  const other = await page.context().newPage();
+  await serveTokenAtSubtaskScores(other, state);
+  await other.goto('/submissions/9');
+  await expect(other.getByText('Test Case #1')).toBeVisible();
+  await expect(other.getByText(/37\s?ms/)).toHaveCount(0);
+
+  await page.goto('/contests/4/problems/1?tab=coding');
+  await page
+    .getByRole('button', { name: 'Use a token on submission #9' })
+    .click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(other.getByText(/37\s?ms/).first()).toBeVisible();
+});
+
+for (const theme of ['light', 'dark']) {
+  test(`a tokened IOI result reads clearly (${theme})`, async ({ page }) => {
+    await serveTokenAtSubtaskScores(page, { tokened: true });
+    await page.addInitScript((t) => localStorage.setItem('theme', t), theme);
+    await page.goto('/contests/4/problems/1?tab=coding');
+    await page.getByText('#9').first().click();
+    // The whole result: the badge, the totals, the subtask and its rows.
+    await expect(page.getByText('Tokened').first()).toBeVisible();
+    await expect(page.getByText('Small')).toBeVisible();
+    await expect(page.getByText(/37\s?ms/).first()).toBeVisible();
+
+    const { violations } = await new AxeBuilder({ page })
+      .withTags(['wcag2a', 'wcag2aa'])
+      .analyze();
+    expect(
+      violations.map((v) => ({
+        rule: v.id,
+        nodes: v.nodes.map((n) => n.target.join(' ')),
+      })),
+    ).toEqual([]);
+  });
+}

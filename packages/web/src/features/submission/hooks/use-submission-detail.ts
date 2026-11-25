@@ -4,6 +4,7 @@ import {
   JUDGING_POLL_MS,
   type Submission,
   submissionPollPace,
+  submissionViewKeys,
 } from '@broccoli/web-sdk/submission';
 import { useQuery } from '@tanstack/react-query';
 
@@ -11,7 +12,7 @@ export function useSubmissionDetail(submissionId: number) {
   const apiClient = useApiClient();
 
   return useQuery<Submission>({
-    queryKey: ['submission', submissionId],
+    queryKey: submissionViewKeys.detail(submissionId),
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/submissions/{id}', {
         params: { path: { id: submissionId } },

@@ -673,7 +673,8 @@ async fn a_judgements_subtask_scores_are_the_ones_it_was_scored_with_after_the_c
     assert_eq!(scores.status, 200, "{}", scores.text);
     assert_eq!(
         scores.body["subtasks"],
-        json!([{ "name": "All Tests", "scoring_method": "sum", "score": 100.0, "max_score": 100.0 }]),
+        // The default subtask is stored nameless: each viewer's language names it.
+        json!([{ "name": "", "scoring_method": "sum", "score": 100.0, "max_score": 100.0 }]),
         "{}",
         scores.text
     );
@@ -781,8 +782,8 @@ async fn ratios_a_lost_attempt_stored_are_not_credited_to_the_judgement_that_sta
     );
 }
 
-/// A problem with no subtask config is scored by the default All Tests
-/// subtask, which leaves out samples, so its scoreboard maximum is the sum
+/// A problem with no subtask config is scored by the default subtask over
+/// all tests, which leaves out samples, so its scoreboard maximum is the sum
 /// of the non-sample test points and a perfect solution reads as full marks.
 #[tokio::test(flavor = "multi_thread")]
 async fn ioi_scoreboard_max_score_leaves_out_samples_like_scoring_does() {

@@ -9,6 +9,7 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   type CodeRun,
   type Submission,
+  submissionViewKeys,
   useSubmissionVisibilityChange,
 } from '@broccoli/web-sdk/submission';
 import { sleep } from '@broccoli/web-sdk/utils';
@@ -202,14 +203,18 @@ export function useSubmissions({
       const invalidateSubmissionLists = () => {
         if (contestId) {
           queryClient.invalidateQueries({
-            queryKey: ['contest-submissions-table', String(contestId)],
+            queryKey: submissionViewKeys.list('contest', String(contestId)),
           });
         }
         queryClient.invalidateQueries({
-          queryKey: ['problem-recent-submissions', contestId, problemId],
+          queryKey: submissionViewKeys.list(
+            'problem-recent',
+            contestId,
+            problemId,
+          ),
         });
         queryClient.invalidateQueries({
-          queryKey: ['admin-submissions-table'],
+          queryKey: submissionViewKeys.list('admin'),
         });
       };
 

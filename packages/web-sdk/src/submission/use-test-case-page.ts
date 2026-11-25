@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useApiClient } from '@/api';
 import { pollInterval } from '@/hooks/poll';
 import { fetchTestCasePage } from '@/submission/fetch-test-case-page';
+import { submissionViewKeys } from '@/submission/query-keys';
 
 export function useTestCasePage({
   submissionId,
@@ -26,8 +27,7 @@ export function useTestCasePage({
   const api = useApiClient();
   const ids = testCaseIds?.join(',');
   return useQuery({
-    queryKey: [
-      'submission-test-cases',
+    queryKey: submissionViewKeys.testCases(
       submissionId,
       judgementId,
       page,
@@ -35,7 +35,7 @@ export function useTestCasePage({
       resultId,
       fullOutput,
       live,
-    ],
+    ),
     enabled: enabled && (!testCaseIds || testCaseIds.length > 0),
     refetchInterval: pollInterval(() => (live ? 1000 : false)),
     queryFn: ({ signal }) =>

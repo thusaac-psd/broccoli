@@ -11,7 +11,10 @@ import {
   SYSTEM_ADMIN,
 } from '@broccoli/web-sdk/permissions';
 import type { SubmissionJudgement } from '@broccoli/web-sdk/submission';
-import { getVerdictBadge } from '@broccoli/web-sdk/submission';
+import {
+  getVerdictBadge,
+  submissionViewKeys,
+} from '@broccoli/web-sdk/submission';
 import {
   Badge,
   Button,
@@ -70,7 +73,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
   const liveWorkers = systemOverview?.workers ?? [];
 
   const judgementsQuery = useQuery({
-    queryKey: ['submission-judgements', submissionId],
+    queryKey: submissionViewKeys.judgements(submissionId),
     enabled: canViewHistory,
     queryFn: async () => {
       const { data, error } = await apiClient.GET(
@@ -106,10 +109,10 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({
-      queryKey: ['submission', submissionId],
+      queryKey: submissionViewKeys.detail(submissionId),
     });
     await queryClient.invalidateQueries({
-      queryKey: ['submission-judgements', submissionId],
+      queryKey: submissionViewKeys.judgements(submissionId),
     });
   };
 

@@ -5,7 +5,10 @@ import type {
   Submission,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
-import { getVerdictBadge } from '@broccoli/web-sdk/submission';
+import {
+  getVerdictBadge,
+  submissionViewKeys,
+} from '@broccoli/web-sdk/submission';
 import { Badge, Button, QueryView } from '@broccoli/web-sdk/ui';
 import { formatKibibytes, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -540,7 +543,7 @@ function ExpandedDetail({ submissionId }: { submissionId: number }) {
   const apiClient = useApiClient();
 
   const query = useQuery<Submission>({
-    queryKey: ['submission', submissionId],
+    queryKey: submissionViewKeys.detail(submissionId),
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/submissions/{id}', {
         params: { path: { id: submissionId } },

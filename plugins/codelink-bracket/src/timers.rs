@@ -126,7 +126,7 @@ struct RetryPayload {
 
 /// Dispatch a timer against current persisted state.
 ///
-/// A failed delivery re-arms the same key a second later, up to
+/// A failed delivery re-arms the same key a second after it arrived, up to
 /// [`MAX_RETRIES`] times, so a transient failure in post-commit work is
 /// retried promptly; scheduling clears the host's claim, so its cleanup
 /// cannot delete the replacement. After that, the error is left to the
@@ -158,8 +158,13 @@ pub fn handle_timer(
         .unwrap_or(0);
     if retry < MAX_RETRIES {
         let next = serde_json::to_string(&RetryPayload { retry: retry + 1 })?;
+        // A second after the delivery, not after the time it was due: a
+        // delivery that came late would otherwise re-arm in the past and
+        // retry back to back. The server's clock says when that is; when it
+        // cannot be read, the due time is the latest known.
+        let delivered_ms = crate::clock::now_ms(host).map_or(fire_at_ms, |now| now.max(fire_at_ms));
         host.timer
-            .schedule(fire_at_ms.saturating_add(RETRY_DELAY_MS), key, &next)?;
+            .schedule(delivered_ms.saturating_add(RETRY_DELAY_MS), key, &next)?;
     }
     Err(error)
 }
@@ -263,6 +268,19 @@ mod tests {
         assert_eq!(host.timer.scheduled_at(&key), Some(6_000));
         assert!(handle_timer(&host, &key, r#"{"retry":4}"#, 6_000).is_err());
         assert_eq!(host.timer.scheduled_at(&key), Some(7_000));
+    }
+
+    #[test]
+    fn a_late_delivery_rearms_a_second_after_it_arrived_not_after_it_was_due() {
+        let host = Host::mock();
+        let key = failing_key(&host);
+        // The match's clock reads nothing usable, so the tick fails; the
+        // server's clock says the delivery came ten seconds late.
+        host.db
+            .queue_query_result(serde_json::json!([{ "unreadable": true }]));
+        crate::test_support::queue_now(&host, 15_000);
+        assert!(handle_timer(&host, &key, "", 5_000).is_err());
+        assert_eq!(host.timer.scheduled_at(&key), Some(16_000));
     }
 
     #[test]
