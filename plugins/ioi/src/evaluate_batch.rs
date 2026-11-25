@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use broccoli_server_sdk::Host;
 use broccoli_server_sdk::error::SdkError;
@@ -13,7 +13,7 @@ use crate::config::round_score;
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
 use crate::persist::persist_results;
 use crate::score::score_submission_subtask_details;
-use crate::subtasks::MemberIndex;
+use crate::subtasks::Counting;
 use broccoli_server_sdk::score::total_score;
 
 /// Per-test-case outcome from evaluation, with raw (0..1) scores.
@@ -53,7 +53,7 @@ impl ContestJudge for IoiJudge {
         // Weight the case's raw 0..1 score by its point value. A case that
         // counts toward no subtask (a sample, unless a subtask names it)
         // adds nothing to the total, so its row records nothing either.
-        if !self.short_circuit.case_subtasks.contains_key(&tc.id) {
+        if !self.short_circuit.counting.counts(tc.id) {
             return 0.0;
         }
         round_score(outcome.score * tc.score)
@@ -180,7 +180,7 @@ fn normalize_raw_score(score: f64) -> f64 {
 struct SubtaskShortCircuit {
     methods: Vec<SubtaskScoringMethod>,
     subtask_cases: Vec<HashSet<i32>>,
-    case_subtasks: HashMap<i32, Vec<usize>>,
+    counting: Counting,
     failed_subtasks: HashSet<usize>,
     active_cases: HashSet<i32>,
     sample_cases: HashSet<i32>,
@@ -189,25 +189,18 @@ struct SubtaskShortCircuit {
 
 impl SubtaskShortCircuit {
     fn new(subtask_defs: &[SubtaskDef], test_cases: &[TestCaseRow]) -> Self {
-        let members = MemberIndex::new(test_cases);
+        let counting = Counting::new(subtask_defs, test_cases);
         let mut subtask_cases = vec![HashSet::new(); subtask_defs.len()];
-        let mut case_subtasks: HashMap<i32, Vec<usize>> = HashMap::new();
-
-        for (subtask_idx, def) in subtask_defs.iter().enumerate() {
-            for key in &def.test_cases {
-                let Some(tc) = members.test_case(key) else {
-                    continue;
-                };
-                if subtask_cases[subtask_idx].insert(tc.id) {
-                    case_subtasks.entry(tc.id).or_default().push(subtask_idx);
-                }
+        for tc in test_cases {
+            for &subtask_idx in counting.subtasks_of(tc.id) {
+                subtask_cases[subtask_idx].insert(tc.id);
             }
         }
 
         Self {
             methods: subtask_defs.iter().map(|def| def.scoring_method).collect(),
             subtask_cases,
-            case_subtasks,
+            counting,
             failed_subtasks: HashSet::new(),
             active_cases: test_cases.iter().map(|tc| tc.id).collect(),
             sample_cases: test_cases
@@ -250,10 +243,9 @@ impl SubtaskShortCircuit {
         failed_test_case_id: i32,
         failed_subtasks: &HashSet<usize>,
     ) -> Vec<i32> {
-        let Some(failed_case_subtasks) = self.case_subtasks.get(&failed_test_case_id) else {
-            return Vec::new();
-        };
-        let newly_failed_cases = failed_case_subtasks
+        let newly_failed_cases = self
+            .counting
+            .subtasks_of(failed_test_case_id)
             .iter()
             .filter(|subtask_idx| self.method_can_short_circuit(**subtask_idx))
             .flat_map(|subtask_idx| self.subtask_cases[*subtask_idx].iter().copied())
@@ -276,21 +268,18 @@ impl SubtaskShortCircuit {
         test_case_id: i32,
         failed_subtasks: &HashSet<usize>,
     ) -> bool {
-        self.case_subtasks
-            .get(&test_case_id)
-            .is_some_and(|subtasks| {
-                subtasks.iter().all(|subtask_idx| {
-                    self.method_can_short_circuit(*subtask_idx)
-                        && failed_subtasks.contains(subtask_idx)
-                })
+        let subtasks = self.counting.subtasks_of(test_case_id);
+        !subtasks.is_empty()
+            && subtasks.iter().all(|subtask_idx| {
+                self.method_can_short_circuit(*subtask_idx) && failed_subtasks.contains(subtask_idx)
             })
     }
 
     fn failing_subtasks_for(&self, test_case_id: i32, raw_score: f64) -> HashSet<usize> {
-        self.case_subtasks
-            .get(&test_case_id)
-            .into_iter()
-            .flat_map(|subtasks| subtasks.iter().copied())
+        self.counting
+            .subtasks_of(test_case_id)
+            .iter()
+            .copied()
             .filter(|subtask_idx| self.result_fails_method(*subtask_idx, raw_score))
             .collect()
     }

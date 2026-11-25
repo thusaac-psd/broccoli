@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use broccoli_server_sdk::types::TestCaseBodyRef;
@@ -202,34 +204,61 @@ pub fn score_all_subtasks(
         .collect()
 }
 
-/// The ids of the test cases `subtask_defs` count: every case a member names.
-/// A case outside them scores nothing, whatever points it carries.
-pub fn counted_test_case_ids(
-    subtask_defs: &[SubtaskDef],
-    test_cases: &[TestCaseRow],
-) -> HashSet<i32> {
-    let members = MemberIndex::new(test_cases);
-    subtask_defs
-        .iter()
-        .flat_map(|def| def.test_cases.iter())
-        .filter_map(|key| members.test_case(key))
-        .map(|tc| tc.id)
-        .collect()
+/// Which subtasks count each test case: a case counts toward a subtask when
+/// the subtask names it ([`MemberIndex`]). A case no subtask names counts
+/// toward nothing and scores nothing, whatever points it carries. Judging
+/// (which cases run, what each case records), the short-circuit and the
+/// `task` config's validator all read this one rule, over the problem's
+/// [`effective_subtasks`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Counting {
+    /// The indexes of the subtasks that count each case, in definition
+    /// order, each subtask once.
+    by_case: HashMap<i32, Vec<usize>>,
 }
 
-/// Return test case IDs that should be evaluated for IOI scoring/feedback.
-///
-/// Samples are retained for feedback. Positive-score cases are retained for
-/// normal scoring. Zero-score non-samples are retained only when an explicit
-/// subtask member names them ([`MemberIndex`]).
+impl Counting {
+    pub fn new(subtask_defs: &[SubtaskDef], test_cases: &[TestCaseRow]) -> Self {
+        let members = MemberIndex::new(test_cases);
+        let mut by_case: HashMap<i32, Vec<usize>> = HashMap::new();
+        for (subtask, def) in subtask_defs.iter().enumerate() {
+            for tc in def
+                .test_cases
+                .iter()
+                .filter_map(|key| members.test_case(key))
+            {
+                let subtasks = by_case.entry(tc.id).or_default();
+                if !subtasks.contains(&subtask) {
+                    subtasks.push(subtask);
+                }
+            }
+        }
+        Self { by_case }
+    }
+
+    /// Whether test case `id` counts toward any subtask.
+    pub fn counts(&self, id: i32) -> bool {
+        self.by_case.contains_key(&id)
+    }
+
+    /// The subtasks test case `id` counts toward.
+    pub fn subtasks_of(&self, id: i32) -> &[usize] {
+        self.by_case.get(&id).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// The test cases judging runs, in test case order: every case that counts
+/// toward a subtask ([`Counting`]), and every sample, which is judged for
+/// its feedback. A case that counts toward no subtask is not judged: it
+/// would score nothing and appears in no subtask's feedback.
 pub fn compute_scoring_test_case_ids(
     subtask_defs: &[SubtaskDef],
     test_cases: &[TestCaseRow],
 ) -> Vec<i32> {
-    let in_a_subtask = counted_test_case_ids(subtask_defs, test_cases);
+    let counting = Counting::new(subtask_defs, test_cases);
     test_cases
         .iter()
-        .filter(|tc| tc.is_sample || tc.score > 0.0 || in_a_subtask.contains(&tc.id))
+        .filter(|tc| tc.is_sample || counting.counts(tc.id))
         .map(|tc| tc.id)
         .collect()
 }
@@ -718,6 +747,7 @@ mod tests {
             test_case(2, 0.0, false, Some("group_a_zero")),
             test_case(3, 20.0, false, Some("group_a_scored")),
             test_case(4, 0.0, false, Some("unused_zero")),
+            test_case(5, 30.0, false, Some("unused_scored")),
         ];
         let defs = vec![make_def(
             SubtaskScoringMethod::GroupMin,
@@ -727,6 +757,8 @@ mod tests {
 
         let ids = compute_scoring_test_case_ids(&defs, &test_cases);
 
+        // A case no subtask counts is not judged, whatever points it carries;
+        // a sample is judged for its feedback.
         assert_eq!(ids, vec![1, 2, 3]);
     }
 
@@ -759,7 +791,7 @@ mod tests {
             test_case(3, 0.0, false, Some("unused_zero")),
         ];
 
-        let ids = compute_scoring_test_case_ids(&[], &test_cases);
+        let ids = compute_scoring_test_case_ids(&effective_subtasks(&[], &test_cases), &test_cases);
 
         assert_eq!(ids, vec![1, 2]);
     }

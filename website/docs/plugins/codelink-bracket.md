@@ -170,8 +170,10 @@ and breaks. Select **Save changes** to apply the edit. At the configured start,
 the preceding stage must be fully decided and its minimum rest completed. If
 either condition was unmet, the stage shows **Reschedule required** and stays
 closed until you assign a new future time. It never silently shifts its clock.
-A delayed or duplicate timer preserves the original clock when prerequisites
-were satisfied at the configured instant. Opened stages stay disabled in the editor.
+A delayed or duplicate timer keeps the stage's schedule when prerequisites
+were satisfied at the configured instant. A game that opens late, because the
+server was unavailable at its start, runs its full duration from the moment it
+opens, so players never lose game time. Opened stages stay disabled in the editor.
 If a stage opens while you are editing, the server rejects changes to it.
 
 The setup API accepts the same edits through the complete setup request. Use

@@ -5,7 +5,10 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde_json::json;
 use server::entity::{plugin_storage, submission, submission_judgement, test_case_result, user};
 
-use crate::{common::E2eTestApp, judging::CPP_SUM};
+use crate::{
+    common::{E2eTestApp, TestResponse},
+    judging::CPP_SUM,
+};
 
 async fn seed_accepted_ioi_submission(
     app: &E2eTestApp,
@@ -2013,21 +2016,32 @@ async fn create_labelled_test_case(
     label: &str,
     token: &str,
 ) -> i32 {
-    let res = app
-        .post_with_token(
-            &format!("/api/v1/problems/{problem_id}/test-cases"),
-            &json!({
-                "input": "1 2",
-                "expected_output": "3",
-                "score": 50,
-                "is_sample": false,
-                "label": label,
-            }),
-            token,
-        )
-        .await;
+    let res = post_test_case(app, problem_id, label, 50, "", token).await;
     assert_eq!(res.status, 201, "create test case: {}", res.text);
     res.id()
+}
+
+/// Posts a test case worth `score` points; `query` goes on the path as it is.
+async fn post_test_case(
+    app: &E2eTestApp,
+    problem_id: i32,
+    label: &str,
+    score: i32,
+    query: &str,
+    token: &str,
+) -> TestResponse {
+    app.post_with_token(
+        &format!("/api/v1/problems/{problem_id}/test-cases{query}"),
+        &json!({
+            "input": "1 2",
+            "expected_output": "3",
+            "score": score,
+            "is_sample": false,
+            "label": label,
+        }),
+        token,
+    )
+    .await
 }
 
 /// A subtask naming a test case the problem does not have would score 0 for
@@ -2072,6 +2086,7 @@ async fn ioi_task_config_naming_a_missing_test_case_is_stored_with_its_issue() {
         task_issue_keys(&issues.body, contest_id, problem_id),
         vec![
             "ioi.config.task.unknownTestCase".to_string(),
+            "ioi.config.task.scoreIgnored".to_string(),
             "ioi.config.task.nothingToScore".to_string(),
         ],
         "the only subtask names no test case, so none can score: {}",
@@ -2239,11 +2254,51 @@ async fn a_test_data_edit_that_breaks_no_config_needs_no_confirmation() {
         )
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
-    create_labelled_test_case(&app, problem_id, "t3", &admin).await;
+    let res = post_test_case(&app, problem_id, "t3", 0, "", &admin).await;
+    assert_eq!(
+        res.status, 201,
+        "a case worth nothing ignores nothing: {}",
+        res.text
+    );
     let res = app
         .patch_with_token(&tc_path, &json!({ "description": "still broken" }), &admin)
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
+}
+
+/// A new test case worth points that no stored subtask names would score
+/// nothing, so adding it asks for confirmation with the issue it causes, and
+/// `force` adds it with the issue listed.
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_a_case_worth_points_no_subtask_names_asks_for_confirmation() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_uncounted_admin", "password", "admin")
+        .await;
+    let (problem_id, contest_id, _) = ioi_problem_with_two_subtasks(&app, &admin).await;
+    let res = post_test_case(&app, problem_id, "t3", 50, "", &admin).await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert_eq!(res.body["code"], "CONFIG_WOULD_BREAK", "{}", res.text);
+    assert_eq!(
+        res.body["details"]["issues"][0]["errors"][0]["key"], "ioi.config.task.scoreIgnored",
+        "{}",
+        res.text
+    );
+
+    let res = post_test_case(&app, problem_id, "t3", 50, "?force=true", &admin).await;
+    assert_eq!(res.status, 201, "{}", res.text);
+    let issues = app
+        .get_with_token(
+            &format!("/api/v1/problems/{problem_id}/config/issues"),
+            &admin,
+        )
+        .await;
+    assert_eq!(
+        task_issue_keys(&issues.body, contest_id, problem_id),
+        vec!["ioi.config.task.scoreIgnored".to_string()],
+        "{}",
+        issues.text
+    );
 }
 
 /// A submission judged while the problem's stored configs have issues says
@@ -2706,6 +2761,8 @@ async fn a_config_write_is_checked_against_test_data_a_concurrent_change_commits
         task_issue_keys(&issues.body, contest_id, problem_id),
         vec![
             "ioi.config.task.unknownTestCase".to_string(),
+            "ioi.config.task.scoreIgnored".to_string(),
+            "ioi.config.task.scoreIgnored".to_string(),
             "ioi.config.task.nothingToScore".to_string(),
         ],
         "the write was checked against the renamed test case: {}",
