@@ -52,6 +52,12 @@ zero points, with a max score equal to the sum of those points. It has no
 stored name: the plugin's routes give it an empty `name`, which no configured
 subtask can have.
 
+A test case counts only toward the subtasks that name it, and the default
+subtask names no sample. A sample is still judged, for its feedback, and its
+row scores 0 whatever points it carries. A sample worth points that no subtask
+names is listed on the problem's config issues, since those points count for
+nothing.
+
 A problem none of whose subtasks can score is not judged: every submission
 to it ends as a system error that stands (`NOTHING_TO_SCORE`), as does every
 submission to a problem with no test cases (`NO_TEST_CASES`). A subtask can
