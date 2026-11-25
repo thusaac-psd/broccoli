@@ -38,7 +38,7 @@ use common::db::{DatabaseConnection, PgPoolSpec, PgSession};
 use plugin_core::executor::CallLocals;
 use plugin_core::manifest::SqlReadScope;
 use plugin_core::pool::Liveness;
-use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement, TransactionTrait};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 /// Every plugin's SQL pool, built on first use. Clones share the pools.
@@ -59,7 +59,29 @@ struct Inner {
     acquire_timeout: Duration,
     leases: Arc<Semaphore>,
     pools: StdMutex<HashMap<String, Arc<Slot>>>,
+    /// Whether the database stops a statement whose client closed its
+    /// connection ([`CutBy`]), learned once, before the first pool opens.
+    cut_by: OnceCell<CutBy>,
 }
+
+/// How a statement cut at its call's deadline is stopped on its backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutBy {
+    /// Its connection is closed: the plugin pools' sessions check their
+    /// client every [`CUT_CHECK_INTERVAL`], so the backend stops the
+    /// statement then and rolls it back. A statement needs nothing read
+    /// before it runs.
+    Closing,
+    /// Its backend is cancelled by pid (`pg_cancel_backend`), read when its
+    /// connection is checked out: a database whose platform cannot check
+    /// its clients.
+    Cancelling,
+}
+
+/// How often a plugin backend running a statement checks that its client
+/// is still connected ([`CutBy::Closing`]): the most a cut statement runs on
+/// past its cut.
+pub const CUT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// One plugin's pool, built once its role and schema are provisioned.
 #[derive(Default)]
@@ -163,17 +185,24 @@ impl SqlCall {
 pub struct Lease {
     pub db: DatabaseConnection,
     pub permit: Arc<OwnedSemaphorePermit>,
+    /// How a statement of this lease is stopped once cut.
+    pub cut_by: CutBy,
 }
 
 impl Lease {
-    /// A connection of the lease's pool for one statement, and the pid of
-    /// its backend, so a statement cut at its call's deadline is cancelled
-    /// there ([`PluginSqlPools::cancel_backend`]). It is checked out through
-    /// the pool's handle, so it fails fast while the database is unreachable
-    /// and counts as busy while held, like the pool's transactions.
-    pub async fn connection(&self) -> Result<(common::db::PooledConnection, i32), DbErr> {
+    /// A connection of the lease's pool for one statement and, where a cut
+    /// statement is cancelled by pid ([`CutBy::Cancelling`]), the pid of its
+    /// backend ([`PluginSqlPools::cancel_backend`]); where it is stopped by
+    /// closing its connection ([`CutBy::Closing`]), nothing is read before
+    /// the statement. It is checked out through the pool's handle, so it
+    /// fails fast while the database is unreachable and counts as busy while
+    /// held, like the pool's transactions.
+    pub async fn connection(&self) -> Result<(common::db::PooledConnection, Option<i32>), DbErr> {
         let mut conn = self.db.acquire().await?;
-        let pid = conn.backend_pid().await?;
+        let pid = match self.cut_by {
+            CutBy::Closing => None,
+            CutBy::Cancelling => Some(conn.backend_pid().await?),
+        };
         Ok((conn, pid))
     }
 }
@@ -219,8 +248,50 @@ impl PluginSqlPools {
                 acquire_timeout,
                 leases: Arc::new(Semaphore::new(budget as usize)),
                 pools: StdMutex::new(HashMap::new()),
+                cut_by: OnceCell::new(),
             }),
         }
+    }
+
+    /// These pools, stopping a cut statement by `cut_by` instead of asking
+    /// the database, for a test of either way.
+    #[cfg(test)]
+    pub fn cutting_by(self, cut_by: CutBy) -> Self {
+        let _ = self.inner.cut_by.set(cut_by);
+        self
+    }
+
+    /// How a cut statement is stopped on this database, asked once: a
+    /// database that takes `client_connection_check_interval` (its platform
+    /// can tell a closed client) stops one by its connection closing; any
+    /// other cancels it by pid. An outage while asking leaves it unasked.
+    async fn cut_by(&self) -> Result<CutBy, DbErr> {
+        self.inner
+            .cut_by
+            .get_or_try_init(|| async {
+                let txn = self.inner.host.begin().await?;
+                let set = txn
+                    .execute_unprepared(&format!(
+                        "SET LOCAL client_connection_check_interval = {}",
+                        CUT_CHECK_INTERVAL.as_millis()
+                    ))
+                    .await;
+                let _ = txn.rollback().await;
+                match set {
+                    Ok(_) => Ok(CutBy::Closing),
+                    Err(e) if common::db::is_outage(&e) => Err(e),
+                    Err(e) => {
+                        tracing::info!(
+                            error = %e,
+                            "The database cannot check its clients; a cut plugin statement \
+                             is cancelled by its backend's pid"
+                        );
+                        Ok(CutBy::Cancelling)
+                    }
+                }
+            })
+            .await
+            .copied()
     }
 
     /// A lease on `plugin_id`'s pool for `call`, provisioning the plugin's
@@ -259,7 +330,13 @@ impl PluginSqlPools {
         };
         let db = self.pool(plugin_id, read, call).await?;
         self.inner.make_room(plugin_id).await;
-        Ok(Lease { db, permit })
+        let cut_by = self
+            .inner
+            .cut_by
+            .get()
+            .copied()
+            .unwrap_or(CutBy::Cancelling);
+        Ok(Lease { db, permit, cut_by })
     }
 
     /// `plugin_id`'s pool. A failed provisioning is logged once, at error
@@ -372,7 +449,12 @@ impl PluginSqlPools {
         let login = schema::provision(&self.inner.host, plugin_id, read).await?;
         *granted = read.to_vec();
         drop(granted);
-        let connect = common::db::pg_connect_options(&self.inner.url, &self.inner.session)?
+        let session = PgSession {
+            client_check_interval: (self.cut_by().await? == CutBy::Closing)
+                .then_some(CUT_CHECK_INTERVAL),
+            ..self.inner.session.clone()
+        };
+        let connect = common::db::pg_connect_options(&self.inner.url, &session)?
             .username(&login.names.role)
             .password(&login.password);
         // Room for every permit plus the transactions a call may hold open

@@ -81,6 +81,11 @@ pub struct PgSession {
     pub statement_timeout: Option<Duration>,
     /// Send the server-side keepalive settings.
     pub tcp_keepalives: bool,
+    /// How often a backend running a statement checks that its client is
+    /// still connected (`client_connection_check_interval`), so a statement
+    /// whose connection the client closed stops and rolls back; `None` sends
+    /// none (the backend never checks). Only some platforms take it.
+    pub client_check_interval: Option<Duration>,
 }
 
 impl PgSession {
@@ -96,6 +101,7 @@ impl PgSession {
             statement_timeout: (statement_timeout_secs > 0)
                 .then(|| Duration::from_secs(statement_timeout_secs)),
             tcp_keepalives,
+            client_check_interval: None,
         }
     }
 
@@ -108,6 +114,7 @@ impl PgSession {
             application_name,
             statement_timeout: None,
             tcp_keepalives: true,
+            client_check_interval: None,
         }
     }
 
@@ -120,7 +127,13 @@ impl PgSession {
         let timeout = self
             .statement_timeout
             .map(|d| ("statement_timeout".to_string(), d.as_millis().to_string()));
-        keepalives.chain(timeout).collect()
+        let check = self.client_check_interval.map(|d| {
+            (
+                "client_connection_check_interval".to_string(),
+                d.as_millis().to_string(),
+            )
+        });
+        keepalives.chain(timeout).chain(check).collect()
     }
 }
 

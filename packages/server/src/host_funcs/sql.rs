@@ -36,19 +36,23 @@ impl PluginSql {
     }
 
     /// Run `statement`, a plugin statement outside any transaction, for
-    /// `call` on a connection of its own, cut at the call's deadline. The
-    /// connection's backend is known before the statement starts, so a cut
-    /// statement is cancelled there: one still running when the cancel lands
-    /// is rolled back, and its connection returns to the pool then, not when
-    /// the statement would have finished. A statement that finished between
-    /// the deadline and the cancel has applied: the call is answered
-    /// unavailable either way, so a plugin's write retried after that answer
-    /// must tolerate having applied. The call answers at the deadline; a task
-    /// that owns the connection (and the lease's permit) sends the cancel and
-    /// only then returns it, so the cancel never lands on a later statement
-    /// and costs the answer nothing. The bound is the host's own cancel,
-    /// whatever the session's settings say. An outage of the database fails
-    /// the call as unavailable ([`settle`]).
+    /// `call` on a connection of its own, cut at the call's deadline. A cut
+    /// statement is stopped on its backend as the lease says
+    /// ([`crate::plugin_db::CutBy`]): its connection is closed, and the
+    /// backend, which checks its client while it runs, stops the statement
+    /// within `CUT_CHECK_INTERVAL` and rolls it back; or, on a database that
+    /// cannot check its clients, its backend (whose pid was read at checkout)
+    /// is cancelled and only then is its connection returned, so the cancel
+    /// never lands on a later statement. Either way the statement no longer
+    /// holds its connection once stopped, not when it would have finished.
+    /// A statement that finished between the deadline and its stop has
+    /// applied: the call is answered unavailable either way, so a plugin's
+    /// write retried after that answer must tolerate having applied. The
+    /// call answers at the deadline; a task that owns the connection (and
+    /// the lease's permit) stops the statement, so the stop costs the answer
+    /// nothing. The bound is the host's own, whatever the session's other
+    /// settings say. An outage of the database fails the call as unavailable
+    /// ([`settle`]).
     async fn standalone<T>(
         &self,
         plugin_id: &str,
@@ -65,8 +69,13 @@ impl PluginSql {
             Err(cut) => {
                 let pools = self.pools.clone();
                 tokio::spawn(async move {
-                    pools.cancel_backend(pid).await;
-                    drop(conn);
+                    match pid {
+                        Some(pid) => {
+                            pools.cancel_backend(pid).await;
+                            drop(conn);
+                        }
+                        None => conn.close().await,
+                    }
                     drop(lease);
                 });
                 Err(cut)
@@ -1538,15 +1547,102 @@ mod tests {
         );
     }
 
-    /// A statement cut at its call's deadline answers at once, whatever the
-    /// cancel costs: here the cancel cannot run until the host connection it
-    /// needs is free, and the cut is answered while the statement still
-    /// runs. The cancel then lands, so the write never applies.
+    /// A plugin's table `t` and an observer counting the statements that
+    /// still write to it.
+    async fn cut_fixture(
+        sql: &PluginSql,
+        url: &str,
+    ) -> (
+        DatabaseConnection,
+        impl AsyncFn() -> i64,
+        impl AsyncFn() -> i64,
+    ) {
+        sql.execute(
+            "p",
+            &crate::plugin_db::SqlCall::default(),
+            Statement::from_string(DbBackend::Postgres, "CREATE TABLE t (v text)"),
+        )
+        .await
+        .expect("leased")
+        .expect("created");
+        let observer: DatabaseConnection = Database::connect(url).await.expect("connect").into();
+        let count = |sql: &'static str| {
+            let observer = observer.clone();
+            async move || {
+                observer
+                    .query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
+                    .await
+                    .expect("count")
+                    .expect("row")
+                    .try_get_by_index::<i64>(0)
+                    .expect("int")
+            }
+        };
+        (
+            observer.clone(),
+            count(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE state = 'active' AND query LIKE 'INSERT INTO t %'",
+            ),
+            count("SELECT count(*) FROM plugin_p.t"),
+        )
+    }
+
+    /// On a database that checks its clients, a statement runs with nothing
+    /// read before it, and one cut at its call's deadline is stopped by its
+    /// connection closing: it needs no other connection (the host's only one
+    /// stays busy throughout), and the write never applies.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cut_statement_stops_when_its_connection_closes() {
+        let (_container, url, host) = one_connection().await;
+        migrate(&url).await;
+        let sql = plugin_sql_on(host.clone(), &url);
+        let (_observer, running, rows) = cut_fixture(&sql, &url).await;
+        let lease = sql
+            .lease("p", &crate::plugin_db::SqlCall::default())
+            .await
+            .expect("leased");
+        assert_eq!(lease.cut_by, crate::plugin_db::CutBy::Closing);
+        let (_conn, pid) = lease.connection().await.expect("connection");
+        assert_eq!(pid, None, "nothing is read before a statement");
+        drop((_conn, lease));
+
+        let holding = host.begin().await.expect("hold the host connection");
+        let cut = sql
+            .execute(
+                "p",
+                &crate::plugin_db::SqlCall {
+                    deadline: Some(Instant::now() + Duration::from_millis(300)),
+                    ..Default::default()
+                },
+                Statement::from_string(
+                    DbBackend::Postgres,
+                    "INSERT INTO t SELECT 'late' FROM pg_sleep(30)",
+                ),
+            )
+            .await;
+        assert!(
+            matches!(cut, Err(crate::plugin_db::Unavailable::Deadline)),
+            "{cut:?}"
+        );
+        while running().await > 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(rows().await, 0, "the statement stopped and rolled back");
+        holding.rollback().await.expect("free the host connection");
+    }
+
+    /// On a database that cannot check its clients, a statement cut at its
+    /// call's deadline answers at once, whatever the cancel costs: here the
+    /// cancel cannot run until the host connection it needs is free, and the
+    /// cut is answered while the statement still runs. The cancel then
+    /// lands, so the write never applies.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_cut_statement_answers_before_its_cancel_lands() {
         let (_container, url, host) = one_connection().await;
         migrate(&url).await;
-        let sql = plugin_sql_on(host.clone(), &url);
+        let mut sql = plugin_sql_on(host.clone(), &url);
+        sql.pools = sql.pools.cutting_by(crate::plugin_db::CutBy::Cancelling);
         let call = |deadline: Option<Instant>| crate::plugin_db::SqlCall {
             deadline,
             ..Default::default()
