@@ -204,13 +204,8 @@ pub async fn create_submission(
         file_count: payload.files.len(),
         contest_type: contest_type.clone(),
     };
-    let enabled_plugins = hooks::resource_enablements(
-        &state.db,
-        &state.registries.contest_type_registry,
-        problem_id,
-        None,
-    )
-    .await?;
+    let enabled_plugins =
+        hooks::resource_enablements(&state.db, &state.type_providers(), problem_id, None).await?;
     let attempt = PendingAttempt::new(&state, &hook_event, &enabled_plugins);
     let language = payload.language.trim().to_string();
     let new_submission = submission::ActiveModel {
@@ -780,7 +775,7 @@ pub async fn create_contest_submission(
 
     let enabled_plugins = hooks::resource_enablements(
         &state.db,
-        &state.registries.contest_type_registry,
+        &state.type_providers(),
         problem_id,
         Some(contest_id),
     )

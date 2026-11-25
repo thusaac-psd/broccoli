@@ -193,19 +193,23 @@ impl<H: Provided> Providers<H> {
     }
 }
 
-/// Which plugin provides each type a problem or contest has: a contest's
+/// Which plugin owns each type a problem or contest has: a contest's
 /// contest type, a problem's problem type, checker format and default
-/// contest type. A plugin's config checks reach every problem and contest of
-/// the types it provides, whether or not a config is stored there
-/// (`services::config_issues`).
+/// contest type, for what is stored or checked per plugin (config
+/// namespaces, config issues, hook enablement). Each key's owner is its
+/// fleet-wide provider (`providers::provider_id`), the same plugin judging
+/// runs it on, whether or not it is loaded here. A plugin's config checks
+/// reach every problem and contest of the types it owns, whether or not a
+/// config is stored there (`services::config_issues`).
 #[derive(Clone)]
 pub struct TypeProviders {
     contest_types: ContestTypeRegistry,
     evaluators: EvaluatorRegistry,
     checker_stages: CheckerStageRegistry,
+    lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
 }
 
-/// The keys of each type registry that resolve to one plugin.
+/// The keys of each type registry one plugin owns.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ProvidedTypes {
     pub contest_types: Vec<String>,
@@ -218,20 +222,40 @@ impl TypeProviders {
         contest_types: ContestTypeRegistry,
         evaluators: EvaluatorRegistry,
         checker_stages: CheckerStageRegistry,
+        lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
     ) -> Self {
         Self {
             contest_types,
             evaluators,
             checker_stages,
+            lifecycle,
         }
     }
 
-    /// The plugin contest type `key` resolves to.
-    pub async fn of_contest_type(&self, key: &str) -> Option<String> {
-        provider(&self.contest_types, key).await
+    async fn owner<H: Provided>(
+        &self,
+        registry: &RwLock<Providers<H>>,
+        kind: crate::providers::Provided,
+        key: &str,
+    ) -> Option<String> {
+        crate::providers::provider_id(
+            &*registry.read().await,
+            self.lifecycle.provider(kind, key),
+            key,
+        )
     }
 
-    /// The plugins a problem's own types resolve to: its problem type, its
+    /// The plugin that owns contest type `key`.
+    pub async fn of_contest_type(&self, key: &str) -> Option<String> {
+        self.owner(
+            &self.contest_types,
+            crate::providers::Provided::ContestType,
+            key,
+        )
+        .await
+    }
+
+    /// The plugins that own a problem's own types: its problem type, its
     /// checker format and its default contest type, each once.
     pub async fn of_problem(
         &self,
@@ -239,10 +263,14 @@ impl TypeProviders {
         checker_format: &str,
         default_contest_type: &str,
     ) -> Vec<String> {
+        use crate::providers::Provided as Kind;
         let mut plugins: Vec<String> = [
-            provider(&self.evaluators, problem_type).await,
-            provider(&self.checker_stages, checker_format).await,
-            provider(&self.contest_types, default_contest_type).await,
+            self.owner(&self.evaluators, Kind::ProblemType, problem_type)
+                .await,
+            self.owner(&self.checker_stages, Kind::CheckerFormat, checker_format)
+                .await,
+            self.owner(&self.contest_types, Kind::ContestType, default_contest_type)
+                .await,
         ]
         .into_iter()
         .flatten()
@@ -252,34 +280,49 @@ impl TypeProviders {
         plugins
     }
 
-    /// The types that resolve to `plugin_id`.
+    /// The types `plugin_id` owns: of the keys it registered here or last
+    /// recorded fleet-wide, those whose owner it is.
     pub async fn provided_by(&self, plugin_id: &str) -> ProvidedTypes {
+        use crate::providers::Provided as Kind;
         ProvidedTypes {
-            contest_types: resolved_to(&self.contest_types, plugin_id).await,
-            problem_types: resolved_to(&self.evaluators, plugin_id).await,
-            checker_formats: resolved_to(&self.checker_stages, plugin_id).await,
+            contest_types: self
+                .owned(&self.contest_types, Kind::ContestType, plugin_id)
+                .await,
+            problem_types: self
+                .owned(&self.evaluators, Kind::ProblemType, plugin_id)
+                .await,
+            checker_formats: self
+                .owned(&self.checker_stages, Kind::CheckerFormat, plugin_id)
+                .await,
         }
     }
-}
 
-async fn provider<H: Provided>(registry: &RwLock<Providers<H>>, key: &str) -> Option<String> {
-    registry
-        .read()
-        .await
-        .get(key)
-        .map(|handler| handler.plugin_id().to_string())
-}
-
-async fn resolved_to<H: Provided>(registry: &RwLock<Providers<H>>, plugin_id: &str) -> Vec<String> {
-    let mut keys: Vec<String> = registry
-        .read()
-        .await
-        .iter()
-        .filter(|(_, handler)| handler.plugin_id() == plugin_id)
-        .map(|(key, _)| key.clone())
-        .collect();
-    keys.sort_unstable();
-    keys
+    async fn owned<H: Provided>(
+        &self,
+        registry: &RwLock<Providers<H>>,
+        kind: crate::providers::Provided,
+        plugin_id: &str,
+    ) -> Vec<String> {
+        let registry = registry.read().await;
+        let mut candidates: Vec<String> = registry
+            .registered_by(plugin_id)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        if let Some(governs) = self.lifecycle.governs(plugin_id) {
+            candidates.extend(governs.provides.keys(kind).iter().cloned());
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+            .into_iter()
+            .filter(|key| {
+                crate::providers::provider_id(&registry, self.lifecycle.provider(kind, key), key)
+                    .as_deref()
+                    == Some(plugin_id)
+            })
+            .collect()
+    }
 }
 
 /// Live operation batches; each batch's state is its waiters' correlation

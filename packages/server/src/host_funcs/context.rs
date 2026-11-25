@@ -134,9 +134,9 @@ pub struct EvaluateHostDeps {
     pub plugin_manager: ManagerRef,
     pub blob_store: Arc<dyn BlobStore>,
     pub hook_registry: SharedHookRegistry,
-    /// Resolves which plugin owns a submission's contest type, for
-    /// `after_judging` hook enablement (see `hooks::resource_enablements`).
-    pub contest_type_registry: ContestTypeRegistry,
+    /// Which plugin owns a submission's contest type, for `after_judging`
+    /// hook enablement (see `hooks::resource_enablements`).
+    pub owners: crate::registry::TypeProviders,
     pub metrics: Option<common::metrics::Metrics>,
     pub redis_client: Option<Arc<redis::Client>>,
     pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
@@ -157,6 +157,17 @@ impl EvaluateHostDeps {
 }
 
 impl HostFunctionSystemDeps {
+    /// Which plugin owns each type a problem or contest has, by the fleet
+    /// rule.
+    pub fn type_providers(&self) -> crate::registry::TypeProviders {
+        crate::registry::TypeProviders::new(
+            self.contest_type_registry.clone(),
+            self.evaluator_registry.clone(),
+            self.checker_stage_registry.clone(),
+            self.plugin_lifecycle.clone(),
+        )
+    }
+
     pub fn with_plugin_manager(self, plugin_manager: &Arc<dyn PluginManager>) -> HostFunctionDeps {
         HostFunctionDeps {
             system: self,
@@ -200,7 +211,7 @@ impl HostFunctionDeps {
             plugin_manager: self.plugin_manager.clone(),
             blob_store: self.system.blob_store.clone(),
             hook_registry: self.system.hook_registry.clone(),
-            contest_type_registry: self.system.contest_type_registry.clone(),
+            owners: self.system.type_providers(),
             metrics: self.system.metrics.clone(),
             redis_client: self.system.redis_client.clone(),
             plugin_config_cache: self.system.plugin_config_cache.clone(),

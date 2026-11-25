@@ -2343,6 +2343,63 @@ mod tests {
         assert_eq!(lifecycle.closed_by(needs), None);
     }
 
+    /// What is stored, checked and hooked per plugin follows the plugin a
+    /// key runs on: a contest type's owner, for its configs, config issues
+    /// and hooks, is its fleet-wide provider even on a replica that has only
+    /// another provider loaded, and that other provider owns nothing of it.
+    #[tokio::test]
+    async fn a_types_owner_is_its_fleet_wide_provider_on_every_replica() {
+        use crate::registry::{ContestTypeHandlers, Providers, TypeProviders};
+        let lifecycle = std::sync::Arc::new(PluginLifecycle::default());
+        for id in ["a-contest", "b-contest"] {
+            lifecycle.set_governs(
+                id,
+                Governs {
+                    provides: Provides {
+                        contest_types: vec!["t".into()],
+                        ..Provides::default()
+                    },
+                    ..Governs::default()
+                },
+            );
+            lifecycle.set_desired(id, true);
+        }
+        let mut here: Providers<ContestTypeHandlers> = Providers::default();
+        here.insert(
+            "t".into(),
+            ContestTypeHandlers {
+                plugin_id: "b-contest".into(),
+                submission_fn: "s".into(),
+                code_run_fn: "r".into(),
+                submission_admission: false,
+            },
+        );
+        let types = TypeProviders::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(here)),
+            Default::default(),
+            Default::default(),
+            lifecycle.clone(),
+        );
+        assert_eq!(
+            types.of_contest_type("t").await.as_deref(),
+            Some("a-contest")
+        );
+        assert_eq!(types.provided_by("a-contest").await.contest_types, ["t"]);
+        assert!(
+            types
+                .provided_by("b-contest")
+                .await
+                .contest_types
+                .is_empty()
+        );
+
+        lifecycle.set_desired("a-contest", false);
+        assert_eq!(
+            types.of_contest_type("t").await.as_deref(),
+            Some("b-contest")
+        );
+    }
+
     #[test]
     fn closed_work_names_the_plugin_and_what_it_provides_for_the_work() {
         let queued = common::SubmissionStatus::Queued;

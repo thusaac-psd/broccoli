@@ -400,7 +400,9 @@ fn add_contest_type_owner(enablements: &mut ResourceEnablements, owner: Option<&
 /// config-enabled plugins only; a practice submission has no contest whose
 /// rules apply.
 ///
-/// The owner comes from the contest's own `contest_type` column. A contest
+/// The owner comes from the contest's own `contest_type` column, resolved
+/// to the type's fleet-wide provider (`registry::TypeProviders`), the
+/// plugin judging runs it on, so every replica runs the same owner's hooks. A contest
 /// with no type gets no owner, even though its submissions are judged under
 /// a fallback type: a fallback is not a choice of format, and must not impose
 /// that format's rules on the contest.
@@ -409,7 +411,7 @@ fn add_contest_type_owner(enablements: &mut ResourceEnablements, owner: Option<&
 /// `after_submission` and `after_judging` agree on which plugins run.
 pub async fn resource_enablements<C: ConnectionTrait>(
     db: &C,
-    contest_types: &crate::registry::ContestTypeRegistry,
+    owners: &crate::registry::TypeProviders,
     problem_id: i32,
     contest_id: Option<i32>,
 ) -> Result<ResourceEnablements, AppError> {
@@ -422,11 +424,7 @@ pub async fn resource_enablements<C: ConnectionTrait>(
         .await?
         .and_then(|c| c.contest_type);
     if let Some(contest_type) = contest_type {
-        let owner = contest_types
-            .read()
-            .await
-            .get(&contest_type)
-            .map(|h| h.plugin_id.clone());
+        let owner = owners.of_contest_type(&contest_type).await;
         add_contest_type_owner(&mut enablements, owner.as_deref());
     }
     Ok(enablements)

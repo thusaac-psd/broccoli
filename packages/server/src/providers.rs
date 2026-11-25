@@ -231,6 +231,23 @@ fn noun(kind: Provided) -> &'static str {
     }
 }
 
+/// The plugin that owns `key` (by `fleet`, its fleet-wide provider), loaded
+/// here or not: that provider; nobody for a key every provider of which is
+/// disabled; for a key no plugin ever recorded, the first provider loaded
+/// here. What judging runs a key on ([`resolve`]) and what owns a key's
+/// configs, issues and hooks agree by this one rule.
+pub fn provider_id<H: crate::registry::Provided>(
+    registry: &crate::registry::Providers<H>,
+    fleet: FleetProvider,
+    key: &str,
+) -> Option<String> {
+    match fleet {
+        FleetProvider::Plugin(plugin_id) => Some(plugin_id),
+        FleetProvider::Closed => None,
+        FleetProvider::Unknown => registry.get(key).map(|h| h.plugin_id().to_string()),
+    }
+}
+
 /// The handler `key` (a `kind` of key) resolves to here: its fleet-wide
 /// provider's registration (`fleet`), or, for a key no plugin ever recorded,
 /// the first loaded here. The one place a dispatch picks a handler.
