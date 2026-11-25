@@ -68,7 +68,6 @@ use sea_orm::{
 use crate::entity::{contest, contest_problem, plugin as plugin_entity, plugin_config, problem};
 use crate::error::AppError;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
-use crate::plugin_lifecycle::Governs;
 use crate::registry::TypeProviders;
 use crate::services::plugin_config::{
     ConfigScope, ConfigTarget, Findings, IncompatibleConfig, Reads, check_config, labelled,
@@ -121,16 +120,13 @@ impl Subject {
     }
 }
 
-/// A target a listing checks, with the plugins loaded here that provide its
-/// types: their namespaces that declare a `validate` function are checked
-/// there with their defaults when no config is stored. `contest_types` and
-/// `problem_types` are the target's types, by which a plugin not loaded here
-/// that provides one is found ([`undecided_at`]).
+/// A target a listing checks, with the fleet-wide providers of its types
+/// (`providers`): those loaded here have their namespaces that declare a
+/// `validate` function checked there with their defaults when no config is
+/// stored; those not loaded here leave it undecided ([`undecided_at`]).
 struct Checked {
     target: ConfigTarget,
     providers: Vec<String>,
-    contest_types: Vec<String>,
-    problem_types: Vec<String>,
 }
 
 /// One config a listing checks: stored, or a namespace's defaults.
@@ -315,8 +311,6 @@ async fn targets_of<C: ConnectionTrait>(
                         &problem.default_contest_type,
                     )
                     .await,
-                contest_types: vec![problem.default_contest_type.clone()],
-                problem_types: vec![problem.problem_type.clone()],
             });
             if in_contests {
                 let contests: Vec<i32> = contest_problem::Entity::find()
@@ -330,8 +324,6 @@ async fn targets_of<C: ConnectionTrait>(
                     targets.push(Checked {
                         target: ConfigTarget::contest_problem(contest.id, problem_id),
                         providers: contest_type_provider(types, &contest).await,
-                        contest_types: contest.contest_type.into_iter().collect(),
-                        problem_types: Vec::new(),
                     });
                 }
             }
@@ -341,12 +333,9 @@ async fn targets_of<C: ConnectionTrait>(
                 return Ok(targets);
             };
             let providers = contest_type_provider(types, &contest).await;
-            let contest_types: Vec<String> = contest.contest_type.into_iter().collect();
             targets.push(Checked {
                 target: ConfigTarget::contest(contest_id),
                 providers: providers.clone(),
-                contest_types: contest_types.clone(),
-                problem_types: Vec::new(),
             });
             let problems: Vec<i32> = contest_problem::Entity::find()
                 .select_only()
@@ -359,8 +348,6 @@ async fn targets_of<C: ConnectionTrait>(
                 targets.push(Checked {
                     target: ConfigTarget::contest_problem(contest_id, problem_id),
                     providers: providers.clone(),
-                    contest_types: contest_types.clone(),
-                    problem_types: Vec::new(),
                 });
             }
         }
@@ -474,8 +461,10 @@ async fn checks_at<C: ConnectionTrait>(
 
 /// The plugins whose checks reach `targets` but cannot run here: enabled
 /// fleet-wide and not loaded here, and either storing a config at a target
-/// (`stored_by_unloaded`) or providing a target's type, as the replica that
-/// last loaded them recorded (`plugin.governs`). A provider whose manifest
+/// (`stored_by_unloaded`) or one of a target's providers, the fleet-wide
+/// providers of its types (`TypeProviders::of_problem`, as the checks that
+/// run read them). A plugin that records providing a type but is not its
+/// fleet-wide provider is never run on it. A provider whose manifest
 /// this replica knows is counted only when it declares a namespace with a
 /// `validate` function at the target's scope, as a loaded one is checked.
 async fn undecided_at<C: ConnectionTrait>(
@@ -487,9 +476,9 @@ async fn undecided_at<C: ConnectionTrait>(
     if targets.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let enabled: Vec<(String, Option<serde_json::Value>)> = plugin_entity::Entity::find()
+    let enabled: Vec<String> = plugin_entity::Entity::find()
         .select_only()
-        .columns([plugin_entity::Column::Id, plugin_entity::Column::Governs])
+        .column(plugin_entity::Column::Id)
         .filter(plugin_entity::Column::IsEnabled.eq(true))
         .into_tuple()
         .all(db)
@@ -499,7 +488,7 @@ async fn undecided_at<C: ConnectionTrait>(
         .read()
         .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?;
     let mut undecided = BTreeSet::new();
-    for (plugin_id, governs) in enabled {
+    for plugin_id in enabled {
         let entry = registry.get(&plugin_id);
         if entry.is_some_and(|entry| entry.status == PluginStatus::Loaded) {
             continue;
@@ -508,9 +497,6 @@ async fn undecided_at<C: ConnectionTrait>(
             undecided.insert(plugin_id);
             continue;
         }
-        let governs: Governs = governs
-            .and_then(|g| serde_json::from_value(g).ok())
-            .unwrap_or_default();
         let checks_at = |scope: ConfigScope| {
             entry.is_none_or(|entry| {
                 entry
@@ -520,16 +506,9 @@ async fn undecided_at<C: ConnectionTrait>(
                     .any(|ns| ns.validate.is_some() && ns.scopes.contains(&scope))
             })
         };
-        let provides = targets.iter().any(|t| {
-            let of_its_types = t
-                .contest_types
-                .iter()
-                .any(|key| governs.provides.contest_types.contains(key))
-                || t.problem_types
-                    .iter()
-                    .any(|key| governs.provides.problem_types.contains(key));
-            of_its_types && checks_at(t.target.scope())
-        });
+        let provides = targets
+            .iter()
+            .any(|t| t.providers.contains(&plugin_id) && checks_at(t.target.scope()));
         if provides {
             undecided.insert(plugin_id);
         }
