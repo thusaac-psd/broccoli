@@ -11,7 +11,7 @@ use crate::extractors::path::AppPath;
 use crate::models::problem::*;
 use crate::services::config_issues::ConfigChecker;
 use crate::services::plugin_config::{
-    ConfigTarget, Reads, RowSettings, delete_config, get_config, write_config,
+    ConfigTarget, Reads, RowSettings, SchemaSource, delete_config, get_config, write_config,
 };
 use crate::state::AppState;
 use crate::utils::problem::find_problem;
@@ -145,7 +145,7 @@ pub async fn get_checker_source(
     };
     let files = match get_config(
         &state.db,
-        state.plugins.get_registry(),
+        SchemaSource::of(&state),
         &ConfigTarget::problem(id),
         &owner.plugin_id,
         &owner.namespace,

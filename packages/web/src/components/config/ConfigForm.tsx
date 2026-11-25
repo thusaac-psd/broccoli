@@ -21,12 +21,17 @@ import type {
 } from './types';
 import { useFieldProblemText } from './use-field-problem-text';
 import {
+  afterWrite,
   deepMerge,
   extractDefaults,
+  forWrite,
   hasOwnDescendantValue,
   hasOwnValueAtPath,
+  markSaved,
+  pathSteps,
   serverFieldErrors,
   setAtPath,
+  unmarked,
   validateAll,
 } from './utils';
 
@@ -105,7 +110,11 @@ function ConfigFormFields({
     [schemaDefaults, inherited],
   );
 
-  const [storedValues, setStoredValues] = useState(initialStored);
+  // Each item of a keyed array is marked with the key it was read under, so
+  // the form tells a saved item from one added (or renamed) since.
+  const [storedValues, setStoredValues] = useState(
+    () => markSaved(initialStored, jsonSchema) as Record<string, unknown>,
+  );
   // The form shows the stored config over the defaults (or the defaults
   // alone after "Defaults"), with the user's edits on top. Derived rather
   // than copied, so defaults that arrive later (inherited values) show up in
@@ -169,6 +178,27 @@ function ConfigFormFields({
     });
   }, []);
 
+  /** A refused field as the form names it: its titles and its items. */
+  function fieldName(path: string): string {
+    return pathSteps(path, jsonSchema, values)
+      .map((step) =>
+        step.kind === 'item'
+          ? (step.label ?? t('config.itemNumber', { n: step.index + 1 }))
+          : pluginId
+            ? pluginText(
+                pluginKeys.configField(
+                  pluginId,
+                  schema.namespace,
+                  step.path,
+                  'title',
+                ),
+                step.title,
+              )
+            : step.title,
+      )
+      .join(' › ');
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
 
@@ -193,7 +223,8 @@ function ConfigFormFields({
       }
     }
 
-    const { error } = await putConfig(payload);
+    const written = forWrite(payload, jsonSchema) as Record<string, unknown>;
+    const { error } = await putConfig(written);
 
     setLoading(false);
     if (error) {
@@ -205,7 +236,9 @@ function ConfigFormFields({
         fields: Object.entries(fieldErrors),
       });
     } else {
-      setStoredValues(payload);
+      setStoredValues(
+        afterWrite(written, jsonSchema) as Record<string, unknown>,
+      );
       setFromDefaults(false);
       setEdits(new Map());
       setMessage({ type: 'success', text: t('plugins.config.saveSuccess') });
@@ -271,8 +304,8 @@ function ConfigFormFields({
             scope,
             pluginId,
             namespace: schema.namespace,
-            values,
-            storedValues,
+            values: unmarked(values),
+            storedValues: unmarked(storedValues),
             schema: jsonSchema,
             isUsingDefaultsOnly,
             inherited,
@@ -320,7 +353,7 @@ function ConfigFormFields({
               {message.fields.map(([path, problem]) => (
                 <li key={path}>
                   {path ? (
-                    <code className="font-mono text-xs">{path}</code>
+                    <span className="font-medium">{fieldName(path)}</span>
                   ) : null}
                   {path ? ': ' : null}
                   {problemText(problem)}

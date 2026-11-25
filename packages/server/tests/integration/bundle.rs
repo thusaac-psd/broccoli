@@ -927,3 +927,58 @@ fn unpacked(archive: &[u8]) -> Vec<u8> {
         .expect("a gzip archive");
     out
 }
+
+/// A secret the target stores for a config of the same id belongs to the
+/// target, never to a bundle another installation wrote: importing such a
+/// bundle leaves every withheld secret unset, says how many, and keeps no
+/// token of the target's for the imported contest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bundle_from_another_installation_keeps_none_of_the_targets_secrets() {
+    let source = TestApp::spawn().await;
+    let (contest, _) = seed_contest(&source).await;
+    exec(
+        &source,
+        &format!(
+            "UPDATE plugin_config SET config = config || '{{\"token\": \"source-secret\"}}' \
+             WHERE scope = 'contest' AND ref_id = '{contest}'"
+        ),
+    )
+    .await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Contest(contest),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+
+    let target = TestApp::spawn().await;
+    exec(
+        &target,
+        &format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('contest', '{contest}', 'server-plugin:bundled', \
+             '{{\"token\": \"target-secret\"}}', 0, now())"
+        ),
+    )
+    .await;
+    let store: Arc<dyn BlobStore> = target.state.blob_store.clone();
+    let summary = server::bundle::import(&target.db, store, ImportOptions::default(), &archive[..])
+        .await
+        .expect("import");
+    assert_eq!(summary.secrets_unset, 1, "{summary}");
+    assert_eq!(
+        text(
+            &target,
+            &format!(
+                "SELECT coalesce(config->>'token', 'unset') AS v FROM plugin_config \
+                 WHERE scope = 'contest' AND ref_id = '{contest}'"
+            )
+        )
+        .await,
+        "unset",
+        "the target's own token never authorises the imported contest"
+    );
+}

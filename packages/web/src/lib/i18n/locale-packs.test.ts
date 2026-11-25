@@ -50,6 +50,7 @@ interface SchemaProperty {
 }
 
 interface Namespace {
+  title?: string;
   description?: string;
   properties?: Record<string, SchemaProperty>;
 }
@@ -66,6 +67,9 @@ function schemaText(
 ): Catalog {
   const text: Catalog = {};
   for (const [namespace, ns] of Object.entries(config)) {
+    if (ns.title) {
+      text[pluginKeys.configTitle(plugin, namespace)] = ns.title;
+    }
     if (ns.description) {
       text[pluginKeys.configDescription(plugin, namespace)] = ns.description;
     }

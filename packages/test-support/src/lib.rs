@@ -215,6 +215,21 @@ async fn clone_template(port: u16, db_name: &str) {
                 ))
                 .await
                 .expect("Failed to point the test database at its clock");
+            // Each test database stands for its own installation: a clone
+            // keeps the template's installation id, so it gets one of its own
+            // (`installation`, which bundles check).
+            let clone = Database::connect(format!(
+                "postgres://postgres:postgres@127.0.0.1:{port}/{db_name}"
+            ))
+            .await
+            .expect("Failed to connect to the test database as the superuser");
+            clone
+                .execute_unprepared(
+                    "UPDATE installation SET installation_id = gen_random_uuid()::text",
+                )
+                .await
+                .expect("Failed to give the test database its own installation id");
+            clone.close().await.expect("close the clone's connection");
         })
         .await
         .expect("admin runtime task panicked");

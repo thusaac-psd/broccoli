@@ -11,7 +11,7 @@ use broccoli_server_sdk::types::{
 };
 use plugin_core::config_schema::{self, FieldError, FieldErrorKind};
 pub(crate) use plugin_core::manifest::ConfigScope;
-use plugin_core::manifest::{ConfigNamespace, PluginManifest};
+use plugin_core::manifest::{ConfigNamespace, PluginManifest, SecretRefusal};
 use plugin_core::registry::PluginRegistry;
 use plugin_core::traits::PluginManager;
 
@@ -162,6 +162,49 @@ pub(crate) fn declared(
         .cloned()
 }
 
+/// The schemas a read shows configs by: this replica's registry, trusted
+/// for a plugin only while this replica serves the version the fleet
+/// published (`PluginLifecycle::serves_published`). An outdated replica's
+/// manifest may lack a field the published one marks secret, so a read
+/// there shows nothing of the plugin's configs.
+#[derive(Clone, Copy)]
+pub(crate) struct SchemaSource<'a> {
+    registry: &'a PluginRegistry,
+    lifecycle: Option<&'a crate::plugin_lifecycle::PluginLifecycle>,
+}
+
+impl<'a> SchemaSource<'a> {
+    /// The schemas a request on this server reads by.
+    pub(crate) fn of(state: &'a crate::state::AppState) -> Self {
+        Self {
+            registry: state.plugins.get_registry(),
+            lifecycle: Some(&state.plugin_lifecycle),
+        }
+    }
+
+    /// The schemas of this replica's registry, trusted as they are: for a
+    /// config a client just wrote, whose values it knows.
+    pub(crate) fn local(registry: &'a PluginRegistry) -> Self {
+        Self {
+            registry,
+            lifecycle: None,
+        }
+    }
+
+    /// The namespace a read may show `plugin_id`'s configs of `namespace`
+    /// by; `None` when no schema for it is known here, or this replica does
+    /// not serve the plugin's published version.
+    pub(crate) fn namespace(&self, plugin_id: &str, namespace: &str) -> Option<ConfigNamespace> {
+        if self
+            .lifecycle
+            .is_some_and(|lifecycle| !lifecycle.serves_published(plugin_id))
+        {
+            return None;
+        }
+        declared(self.registry, plugin_id, namespace)
+    }
+}
+
 /// A stored config as a read shows it.
 pub(crate) struct Shown {
     /// Each secret field `null`; `null` whole when `withheld`.
@@ -174,17 +217,18 @@ pub(crate) struct Shown {
 
 /// A stored config as a read shows it: each secret field its namespace
 /// declares `null`, with the paths of those that hold a value, and nothing
-/// at all when this server knows no schema for the namespace, since no one
-/// here can say which of its fields are secret. Every route that answers a
+/// at all when this server knows no schema for the namespace it may trust
+/// ([`SchemaSource::namespace`]), since no one here can say which of its
+/// fields are secret. Every route that answers a
 /// stored config builds its answer here, so a secret never leaves the
 /// server.
 pub(crate) fn shown(
-    registry: &PluginRegistry,
+    schemas: SchemaSource<'_>,
     plugin_id: &str,
     namespace: &str,
     mut config: serde_json::Value,
 ) -> Shown {
-    match declared(registry, plugin_id, namespace) {
+    match schemas.namespace(plugin_id, namespace) {
         Some(ns) => {
             let secrets = ns.withhold_secrets(&mut config);
             Shown {
@@ -203,7 +247,7 @@ pub(crate) fn shown(
 
 pub(crate) async fn get_config<C: ConnectionTrait>(
     db: &C,
-    registry: &PluginRegistry,
+    schemas: SchemaSource<'_>,
     target: &ConfigTarget,
     plugin_id: &str,
     namespace: &str,
@@ -220,7 +264,7 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     match row {
         Some(r) => {
             let namespace = strip_namespace_prefix(&r.namespace).to_string();
-            let shown = shown(registry, plugin_id, &namespace, r.config);
+            let shown = shown(schemas, plugin_id, &namespace, r.config);
             Ok(Json(PluginConfigResponse {
                 plugin_id: plugin_id.to_string(),
                 namespace,
@@ -580,19 +624,30 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     // the stored config holds for the same item.
     let mut config = config;
     if let Some(ns) = declared(plugins.get_registry(), plugin_id, namespace) {
+        // Under the row's lock: a save that rotates a secret meanwhile is
+        // waited for, so this one keeps the new secret instead of reverting
+        // it.
         let stored = plugin_config::Entity::find_by_id((
             target.scope().as_str().to_string(),
             target.ref_id().to_string(),
             target.stored_namespace(plugin_id, namespace),
         ))
+        .lock(LockType::Update)
         .one(&txn)
         .await?;
         ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config))
-            .map_err(|unstored| {
+            .map_err(|refused| {
                 AppError::InvalidConfig(
-                    unstored
+                    refused
                         .into_iter()
-                        .map(|path| FieldError::new(path, FieldErrorKind::SecretNotStored))
+                        .map(|refusal| match refusal {
+                            SecretRefusal::NotStored(path) => {
+                                FieldError::new(path, FieldErrorKind::SecretNotStored)
+                            }
+                            SecretRefusal::Required(path) => {
+                                FieldError::new(path, FieldErrorKind::SecretRequired)
+                            }
+                        })
                         .collect(),
                 )
             })?;
@@ -634,7 +689,12 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     .await?;
     let change = ConfigChange::of(&txn, target).await?;
     txn.commit().await?;
-    let shown = shown(plugins.get_registry(), plugin_id, namespace, row.config);
+    let shown = shown(
+        SchemaSource::local(plugins.get_registry()),
+        plugin_id,
+        namespace,
+        row.config,
+    );
     Ok((
         PluginConfigResponse {
             plugin_id: plugin_id.to_string(),
@@ -800,6 +860,13 @@ pub(crate) struct Readable {
 }
 
 impl Readable {
+    /// A caller who may read no scope's row.
+    pub(crate) const NOTHING: Self = Self {
+        plugin: false,
+        problem: false,
+        contest: false,
+    };
+
     pub(crate) fn of(user: &crate::extractors::auth::AuthUser) -> Self {
         use broccoli_server_sdk::permissions as perm;
         Self {
@@ -1101,6 +1168,87 @@ mod tests {
             username: "u".into(),
             roles: Vec::new(),
             permissions: permissions.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    /// A registry holding plugin `p`, whose namespace `ns` marks `token`
+    /// secret.
+    fn registry_with_a_secret() -> PluginRegistry {
+        let manifest = plugin_core::manifest::parse_manifest(
+            r#"
+            name = "p"
+            version = "1.0.0"
+            [config.ns]
+            scopes = ["plugin"]
+            [config.ns.properties.token]
+            type = "string"
+            secret = true
+            "#,
+        )
+        .expect("manifest");
+        let entry = plugin_core::registry::PluginEntry::new(
+            "p".into(),
+            std::path::PathBuf::from("/tmp/does-not-need-to-exist"),
+            manifest,
+        )
+        .expect("entry");
+        std::sync::Arc::new(std::sync::RwLock::new(
+            [("p".to_string(), entry)].into_iter().collect(),
+        ))
+    }
+
+    #[test]
+    fn a_replica_that_does_not_serve_the_published_version_shows_nothing_of_its_configs() {
+        use crate::plugin_fleet::{ReplicaPluginState, ReplicaPluginStatus};
+        use crate::plugin_lifecycle::PluginLifecycle;
+        let registry = registry_with_a_secret();
+        let config = serde_json::json!({ "token": "t", "other": "o" });
+        let reporting = |status| {
+            PluginLifecycle::reporting(
+                [(
+                    "p".to_string(),
+                    ReplicaPluginState {
+                        status,
+                        error: None,
+                        generation: 1,
+                        retry_in_ms: None,
+                        version: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )
+        };
+        let current = reporting(ReplicaPluginStatus::Loaded);
+        let served = shown(
+            SchemaSource {
+                registry: &registry,
+                lifecycle: Some(&current),
+            },
+            "p",
+            "ns",
+            config.clone(),
+        );
+        assert!(!served.withheld);
+        assert_eq!(served.config["token"], serde_json::Value::Null);
+        assert_eq!(served.config["other"], "o");
+
+        for status in [
+            ReplicaPluginStatus::Outdated,
+            ReplicaPluginStatus::Mismatched,
+        ] {
+            let behind = reporting(status);
+            let served = shown(
+                SchemaSource {
+                    registry: &registry,
+                    lifecycle: Some(&behind),
+                },
+                "p",
+                "ns",
+                config.clone(),
+            );
+            assert!(served.withheld, "{status:?}");
+            assert_eq!(served.config, serde_json::Value::Null, "{status:?}");
         }
     }
 

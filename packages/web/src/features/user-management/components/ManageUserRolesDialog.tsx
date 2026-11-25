@@ -50,7 +50,11 @@ export function ManageUserRolesDialog({
 
   // A failed fetch falls back to the roles the users list already shows.
   // eslint-disable-next-line no-restricted-syntax
-  const { data: userDetail, isLoading: isLoadingUser } = useQuery({
+  const {
+    data: userDetail,
+    isLoading: isLoadingUser,
+    isSuccess: userDetailLoaded,
+  } = useQuery({
     queryKey: ['admin-user-detail', userId],
     enabled: open && !!userId,
     queryFn: async () => {
@@ -68,21 +72,23 @@ export function ManageUserRolesDialog({
 
   // Without the role list (not loaded, or not readable by this admin) the
   // dialog takes a role name typed by hand instead.
-  const roleOptions =
-    useQuery({
-      queryKey: ['admin-role-options'],
-      enabled: open,
-      staleTime: 60_000,
-      queryFn: async () => {
-        const { data, error } = await apiClient.GET('/roles');
-        if (error) throw error;
-        return data;
-      },
-    }).data ?? NO_ROLES;
+  const roleOptionsQuery = useQuery({
+    queryKey: ['admin-role-options'],
+    enabled: open,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/roles');
+      if (error) throw error;
+      return data;
+    },
+  });
+  const roleOptions = roleOptionsQuery.isSuccess
+    ? roleOptionsQuery.data
+    : NO_ROLES;
 
   const currentRoles = useMemo(
-    () => userDetail?.roles ?? user?.roles ?? [],
-    [user?.roles, userDetail?.roles],
+    () => (userDetailLoaded ? userDetail.roles : (user?.roles ?? [])),
+    [user?.roles, userDetail?.roles, userDetailLoaded],
   );
 
   const assignableRoles = useMemo(() => {

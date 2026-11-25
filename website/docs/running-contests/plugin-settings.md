@@ -53,9 +53,12 @@ level it comes from but not its value.
 A secret, such as a print station's token, is never shown at any level, to
 anyone. Its field stays empty with a note that the stored secret is kept:
 leave it empty to keep it, type a new one to replace it, or choose Clear to
-remove it when you save. A secret stays with its item: you can add, remove and
-reorder print stations, and each keeps its own token. A station you rename
-needs its token entered again.
+remove it when you save (a required secret, such as a station's token, has no
+Clear: replace it instead). A secret stays with its item: you can add, remove
+and reorder print stations, and each keeps its own token. A station you add,
+or rename, is a new station and needs its token entered, even if you removed
+one of that name in the same edit; once you save a station's removal, its
+token is gone for good. Two stations cannot share a name.
 
 ## Where to set them
 

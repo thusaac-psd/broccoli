@@ -98,21 +98,34 @@ the field as `null`, and the config's `secrets` list names each secret field
 that holds a value, by its path in the config as read (`stations[0].token`).
 
 A secret belongs to the item it was set on, never to a position. A write that
-sends `null` for a secret keeps what the stored config holds for the same
-item, the stored item whose key field has the same value, so saving the
-config back unchanged keeps every station's token whatever stations were
-added, removed or moved. A `null` secret whose item has no stored secret (a
-new station, or one whose name changed) is refused with a
-`secret_not_stored` field error: enter its secret again. A string replaces a
-secret, and the marker `{"$clear": true}` clears it, so the field reads unset.
+sends `null` for a secret, or leaves the field out, keeps what the stored
+config holds for the same item, the stored item whose key field has the same
+value, so saving the config back unchanged, or from a file that holds no
+secrets, keeps every station's token whatever stations were added, removed
+or moved. A `null` secret whose item has no stored secret (a new station, or
+one whose name changed) is refused with a `secret_not_stored` field error:
+enter its secret again. Once a save drops an item, its secret is gone: a
+later item with the same key starts without one. A string replaces a secret,
+and only the marker `{"$clear": true}` clears it, so the field reads unset; a
+secret its item requires is never cleared, and the marker is refused with a
+`secret_required` field error. Two items of a keyed array with the same key
+are refused with a `duplicate_key` field error at the second. The marker's
+shape is the API schema's `ClearSecret`.
+
 The settings form shows a set secret as an empty password field that keeps
 the stored value unless you type a new one, with a Clear action that sends the
-marker.
+marker (none for a required secret). An item the form adds, or one whose key
+you change, is new even if a saved item had that key: its secret is entered,
+and a blank one is sent as the marker, so no saved item's secret passes to it.
 
 A config whose namespace this server knows no schema for (its plugin is not
-installed here, or no longer declares the namespace) cannot say which of its
-fields are secret, so every read withholds it whole: `config` is `null` and
-`config_withheld` is `true`.
+installed here, or no longer declares the namespace), or whose plugin this
+server does not run at the version the fleet published, cannot say which of
+its fields are secret, so every read withholds it whole: `config` is `null`
+and `config_withheld` is `true`, and the cascade shows none of its scopes.
+
+A namespace may also declare a short `title`, which labels its tab in the
+settings form; the namespace's id labels it otherwise.
 
 Your plugin reads the real value: `host.config.get*` and the cascade a plugin
 reads are not redacted. A secret can still read unset, for example in a config
@@ -275,10 +288,13 @@ withholds each one by the namespace's schema, read from the plugin's published
 upload or the server's plugin directory, and lists where in the bundle, each
 array item named by its key field. The configs of a plugin with neither, and a
 config whose namespace its manifest no longer declares, stay out, and the
-export names them. The import keeps the secret the target stored, before the
-import replaced anything, for the same item of the same config, and otherwise
-leaves the field unset: re-importing a server's own export keeps every secret
-it had.
+export names them. The bundle records the installation that wrote it (an id
+each database is given once). An import onto that installation keeps the
+secret it stored, before the import replaced anything, for the same item of
+the same config, so re-importing a server's own export keeps every secret it
+had. An import onto any other installation keeps none of its own secrets for
+the bundle's configs: each withheld secret is left unset, and the import's
+summary says how many.
 
 An import runs no plugin, so it checks none of the configs it restores, and
 the problems' `config_issues` flags do not travel: they describe the source's

@@ -158,3 +158,24 @@ type = "string"
 [config.bundled.properties.token]
 type = "string"
 secret = true
+
+# Keyed items whose secret each item requires, as a print station's token.
+[config.keyed]
+description = "Fixture config of keyed items with a required secret"
+scopes = ["problem"]
+
+[config.keyed.properties.stations]
+type = "array"
+key = "name"
+default = []
+
+[config.keyed.properties.stations.items]
+type = "object"
+required = ["name", "token"]
+
+[config.keyed.properties.stations.items.properties.name]
+type = "string"
+
+[config.keyed.properties.stations.items.properties.token]
+type = "string"
+secret = true

@@ -49,7 +49,8 @@ enum Command {
     Import {
         /// The archive to read. Default: stdin.
         archive: Option<PathBuf>,
-        /// Replace the problems the database already has.
+        /// Replace every problem the database already has, those the
+        /// bundle does not carry included: they are removed.
         #[arg(long)]
         replace_problems: bool,
         /// Replace the contest the database has with the bundle's contest

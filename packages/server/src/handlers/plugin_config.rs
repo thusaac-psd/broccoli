@@ -5,7 +5,7 @@ use tracing::instrument;
 
 use std::collections::HashSet;
 
-use plugin_core::registry::{PluginRegistry, PluginStatus};
+use plugin_core::registry::PluginStatus;
 use plugin_core::traits::PluginManager;
 
 // visibility-bypass-audited: the global config endpoints require
@@ -28,8 +28,8 @@ use crate::models::plugin_config::{
 use crate::services::config_issues::ConfigChecker;
 use crate::services::config_issues::{Subject, config_issues};
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, IncompatibleConfig, Readable, Reads, cascade_view, config_cascade,
-    declared, delete_config, get_config, shown, write_config,
+    ConfigScope, ConfigTarget, IncompatibleConfig, Readable, Reads, SchemaSource, cascade_view,
+    config_cascade, declared, delete_config, get_config, shown, write_config,
 };
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
@@ -93,7 +93,7 @@ fn collect_schemas_for_scope(
 
 async fn list_config_inner<C: ConnectionTrait>(
     db: &C,
-    registry: &PluginRegistry,
+    schemas: SchemaSource<'_>,
     target: &ConfigTarget,
     available_schemas: &[AvailableSchema],
 ) -> Result<Json<Vec<PluginConfigResponse>>, AppError> {
@@ -123,7 +123,7 @@ async fn list_config_inner<C: ConnectionTrait>(
 
             seen_keys.insert((plugin_id.clone(), namespace.clone()));
 
-            let shown = shown(registry, &plugin_id, &namespace, r.config);
+            let shown = shown(schemas, &plugin_id, &namespace, r.config);
             PluginConfigResponse {
                 plugin_id,
                 namespace,
@@ -164,6 +164,7 @@ async fn list_config_inner<C: ConnectionTrait>(
 async fn cascade_inner<C: ConnectionTrait>(
     db: &C,
     plugins: &dyn PluginManager,
+    schemas: SchemaSource<'_>,
     target: &ConfigTarget,
     readable: Readable,
 ) -> Result<Json<Vec<ConfigCascadeResponse>>, AppError> {
@@ -177,6 +178,14 @@ async fn cascade_inner<C: ConnectionTrait>(
             .into_iter()
             .map(|c| {
                 let ns = declared(plugins.get_registry(), &c.plugin_id, &c.namespace);
+                // A plugin whose published manifest this replica does not
+                // serve may mark secret what its local one does not: no
+                // scope of it shows here, each field named withheld.
+                let readable = if schemas.namespace(&c.plugin_id, &c.namespace).is_some() {
+                    readable
+                } else {
+                    Readable::NOTHING
+                };
                 ConfigCascadeResponse {
                     effective: cascade_view(c.effective, readable, ns.as_ref()),
                     inherited: cascade_view(c.inherited, readable, ns.as_ref()),
@@ -220,7 +229,7 @@ pub async fn list_plugin_global_config(
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
     validate_plugin_id(&plugin_id)?;
     let target = ConfigTarget::plugin(&plugin_id);
-    list_config_inner(&state.db, state.plugins.get_registry(), &target, &[]).await
+    list_config_inner(&state.db, SchemaSource::of(&state), &target, &[]).await
 }
 
 #[utoipa::path(
@@ -254,7 +263,7 @@ pub async fn get_plugin_global_config(
     let target = ConfigTarget::plugin(&plugin_id);
     get_config(
         &state.db,
-        state.plugins.get_registry(),
+        SchemaSource::of(&state),
         &target,
         &plugin_id,
         &namespace,
@@ -374,7 +383,7 @@ pub async fn list_problem_config(
     find_problem(&state.db, problem_id).await?;
     let target = ConfigTarget::problem(problem_id);
     let schemas = collect_schemas_for_scope(&*state.plugins, ConfigScope::Problem);
-    list_config_inner(&state.db, state.plugins.get_registry(), &target, &schemas).await
+    list_config_inner(&state.db, SchemaSource::of(&state), &target, &schemas).await
 }
 
 #[utoipa::path(
@@ -443,6 +452,7 @@ pub async fn list_problem_config_cascade(
     cascade_inner(
         &state.db,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         &ConfigTarget::problem(problem_id),
         Readable::of(&auth_user),
     )
@@ -482,7 +492,7 @@ pub async fn get_problem_config(
     let target = ConfigTarget::problem(problem_id);
     get_config(
         &state.db,
-        state.plugins.get_registry(),
+        SchemaSource::of(&state),
         &target,
         &plugin_id,
         &namespace,
@@ -615,7 +625,7 @@ pub async fn list_contest_problem_config(
     find_contest_problem(&state.db, contest_id, problem_id).await?;
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
     let schemas = collect_schemas_for_scope(&*state.plugins, ConfigScope::ContestProblem);
-    list_config_inner(&state.db, state.plugins.get_registry(), &target, &schemas).await
+    list_config_inner(&state.db, SchemaSource::of(&state), &target, &schemas).await
 }
 
 #[utoipa::path(
@@ -646,6 +656,7 @@ pub async fn list_contest_problem_config_cascade(
     cascade_inner(
         &state.db,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         &ConfigTarget::contest_problem(contest_id, problem_id),
         Readable::of(&auth_user),
     )
@@ -689,7 +700,7 @@ pub async fn get_contest_problem_config(
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
     get_config(
         &state.db,
-        state.plugins.get_registry(),
+        SchemaSource::of(&state),
         &target,
         &plugin_id,
         &namespace,
@@ -824,7 +835,7 @@ pub async fn list_contest_config(
     find_contest(&state.db, contest_id).await?;
     let target = ConfigTarget::contest(contest_id);
     let schemas = collect_schemas_for_scope(&*state.plugins, ConfigScope::Contest);
-    list_config_inner(&state.db, state.plugins.get_registry(), &target, &schemas).await
+    list_config_inner(&state.db, SchemaSource::of(&state), &target, &schemas).await
 }
 
 #[utoipa::path(
@@ -889,6 +900,7 @@ pub async fn list_contest_config_cascade(
     cascade_inner(
         &state.db,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         &ConfigTarget::contest(contest_id),
         Readable::of(&auth_user),
     )
@@ -928,7 +940,7 @@ pub async fn get_contest_config(
     let target = ConfigTarget::contest(contest_id);
     get_config(
         &state.db,
-        state.plugins.get_registry(),
+        SchemaSource::of(&state),
         &target,
         &plugin_id,
         &namespace,

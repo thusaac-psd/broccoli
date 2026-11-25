@@ -13,8 +13,11 @@
 //!
 //! No bundle carries a secret config field (`secret = true` in its plugin's
 //! schema): the export withholds each one as the read routes do and lists
-//! where in [`Manifest::withheld`], and the import keeps what the target
-//! stores there, else leaves the field unset.
+//! where in [`Manifest::withheld`]. An import onto the installation that
+//! wrote the bundle ([`Manifest::installation`]) keeps what it stores there;
+//! onto any other, a withheld secret is left unset, since another
+//! installation's secret for a config of the same id was never this
+//! bundle's.
 //!
 //! Columns are read from the database at export and named at import, so a
 //! bundle restores onto any build that knows its schema version: a column
@@ -73,8 +76,9 @@ pub struct ExportOptions {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ImportOptions {
-    /// Replace the problems the target already has. Refused while anything
-    /// references them, unless `wipe_dependents`.
+    /// Replace every problem the target already has, those the bundle does
+    /// not carry included. Refused while anything references them, unless
+    /// `wipe_dependents`.
     pub replace_problems: bool,
     /// Replace the target's contest that has the bundle's contest id.
     /// Refused while anything but its roster and problem links references
@@ -97,6 +101,10 @@ pub struct Manifest {
     pub blobs: Vec<String>,
     /// The secret config fields the export withheld.
     pub withheld: Vec<Withheld>,
+    /// The id of the installation that wrote the bundle
+    /// (`entity::installation`): only an import onto it keeps the secrets
+    /// the export withheld.
+    pub installation: String,
 }
 
 /// The secret fields of one `plugin_config` row that an export withheld:
@@ -123,6 +131,9 @@ pub struct TableRows {
 pub struct Summary {
     pub tables: Vec<(String, u64)>,
     pub blobs: usize,
+    /// The secret fields an import left unset: the bundle comes from another
+    /// installation, so the secrets the target stores are not its own.
+    pub secrets_unset: usize,
     /// The plugins, and the `plugin:namespace` configs, an export left out:
     /// no manifest of the plugin is at hand, or it does not declare the
     /// namespace, so no one could say which of their fields are secret.
@@ -133,6 +144,13 @@ impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (table, rows) in &self.tables {
             writeln!(f, "{table}: {rows} rows")?;
+        }
+        if self.secrets_unset > 0 {
+            writeln!(
+                f,
+                "secret config fields left unset (the bundle comes from another installation): {}",
+                self.secrets_unset
+            )?;
         }
         if !self.configs_left_out.is_empty() {
             writeln!(
@@ -439,6 +457,7 @@ pub async fn export(
         ensure!(exists, "there is no contest {id}");
     }
     let schema = schema_version(&mut tx).await?;
+    let installation = installation_id(&mut tx).await?;
     let schemas = config_schemas(&mut tx, store, plugins_dir, &scope).await?;
     let mut withheld = Vec::new();
     let mut config_hashes = BTreeSet::new();
@@ -522,6 +541,7 @@ pub async fn export(
         tables: tables.iter().map(|(t, _)| t.clone()).collect(),
         blobs: sizes.keys().cloned().collect(),
         withheld,
+        installation,
     };
     let gz = flate2::write::GzEncoder::new(out, flate2::Compression::default());
     let mut archive = tar::Builder::new(gz);
@@ -822,6 +842,15 @@ mod copy_text {
     }
 }
 
+/// This database's installation id (`entity::installation`).
+async fn installation_id(tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<String> {
+    sqlx::query_scalar("SELECT installation_id FROM installation WHERE id = $1")
+        .bind(crate::entity::installation::ROW_ID)
+        .fetch_one(&mut **tx)
+        .await
+        .context("read the installation id")
+}
+
 /// The configs the target stores for the rows whose secrets the export
 /// withheld, read before the import replaces anything: replacing a problem
 /// deletes its configs, and the secrets they hold are what the import keeps.
@@ -939,10 +968,25 @@ pub async fn import(
          so it migrates the database",
         known.last().map(String::as_str).unwrap_or_default()
     );
-    let stored = stored_configs(&mut tx, &manifest.withheld).await?;
+    // Only this installation's own export may keep what it stores: another
+    // installation's secret for a config of the same id was never the
+    // bundle's.
+    let own = manifest.installation == installation_id(&mut tx).await?;
+    let stored = if own {
+        stored_configs(&mut tx, &manifest.withheld).await?
+    } else {
+        BTreeMap::new()
+    };
     prepare_problem_tables(&mut tx, options).await?;
 
-    let mut summary = Summary::default();
+    let mut summary = Summary {
+        secrets_unset: if own {
+            0
+        } else {
+            manifest.withheld.iter().map(|row| row.secrets.len()).sum()
+        },
+        ..Summary::default()
+    };
     let mut loaded = Vec::new();
     for entry in entries {
         let mut entry = entry?;
@@ -1218,7 +1262,8 @@ async fn replace_problems(
 ) -> anyhow::Result<()> {
     ensure!(
         options.replace_problems,
-        "the database already has {existing} problem(s); pass --replace-problems to replace them"
+        "the database already has {existing} problem(s); pass --replace-problems to replace them, \
+         which removes every problem it has, those the bundle does not carry included"
     );
     let replaced: Vec<String> = problem_tables().map(str::to_string).collect();
     // Every table whose rows reference a replaced row, directly or through

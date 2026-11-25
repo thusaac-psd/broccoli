@@ -521,6 +521,9 @@ impl ConfigScope {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConfigNamespace {
+    /// A short name for the namespace, which the settings form labels its
+    /// tab by (the namespace's id when absent); `description` says more.
+    pub title: Option<String>,
     pub description: Option<String>,
     /// Where this namespace can be configured. The host refuses a config for
     /// it anywhere else.
@@ -590,9 +593,10 @@ pub struct SetSecret {
 }
 
 /// What [`each_secret`] calls with each secret field: its path, its
-/// identity, the object that holds it, and its key there.
-type SecretVisit<'a> =
-    dyn FnMut(&str, &[SecretStep], &mut serde_json::Map<String, serde_json::Value>, &str) + 'a;
+/// identity, the object that holds it, its key there, and whether that
+/// object requires it.
+type SecretVisit<'a> = dyn FnMut(&str, &[SecretStep], &mut serde_json::Map<String, serde_json::Value>, &str, bool)
+    + 'a;
 
 /// Calls `visit` with each secret field of `value` that `properties`
 /// declare, inside nested objects and array items too, with its path
@@ -600,6 +604,7 @@ type SecretVisit<'a> =
 /// key field.
 fn each_secret(
     properties: &HashMap<String, SchemaProperty>,
+    required: &[String],
     value: &mut serde_json::Value,
     path: &str,
     identity: &mut Vec<SecretStep>,
@@ -619,9 +624,16 @@ fn each_secret(
         };
         identity.push(SecretStep::Field(key.clone()));
         if property.secret {
-            visit(&at, identity, fields, key);
+            visit(&at, identity, fields, key, required.contains(key));
         } else if let Some(child) = fields.get_mut(key) {
-            each_secret(&property.properties, child, &at, identity, visit);
+            each_secret(
+                &property.properties,
+                property.required.as_deref().unwrap_or_default(),
+                child,
+                &at,
+                identity,
+                visit,
+            );
             if let (Some(items), serde_json::Value::Array(elements)) = (&property.items, child) {
                 for (i, element) in elements.iter_mut().enumerate() {
                     let item = SecretStep::Item {
@@ -636,6 +648,7 @@ fn each_secret(
                     identity.push(item);
                     each_secret(
                         &items.properties,
+                        items.required.as_deref().unwrap_or_default(),
                         element,
                         &format!("{at}[{i}]"),
                         identity,
@@ -695,34 +708,64 @@ fn at_identity_mut<'a>(
     })
 }
 
+/// Why a write's secret field is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretRefusal {
+    /// It keeps (sends `null` for) a secret no stored item holds.
+    NotStored(String),
+    /// It clears a secret its object requires.
+    Required(String),
+}
+
+/// What a write's secret field comes to: kept, or refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    Yes,
+    NotStored,
+    Required,
+}
+
 /// Keeps, at field `key` of `fields`, the secret `identity` names in
-/// `stored` when a write sends `null` for it, and clears it on the
-/// [`CLEAR_SECRET`] marker. `false` when the write keeps a secret `stored`
-/// does not hold.
+/// `stored` when a write sends `null` for it or leaves it out, and clears it
+/// only on the [`CLEAR_SECRET`] marker: a write from a file that holds no
+/// secrets never wipes one. A clear of a secret the object requires
+/// (`required`) is refused, as is a `null` for a secret `stored` does not
+/// hold.
 fn keep(
     fields: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
     identity: &[SecretStep],
     stored: Option<&serde_json::Value>,
-) -> bool {
+    required: bool,
+) -> Kept {
+    let kept = || {
+        stored
+            .and_then(|stored| at_identity(stored, identity))
+            .filter(|kept| !unset(kept))
+            .cloned()
+    };
     match fields.get(key) {
         Some(marker) if clears(marker) => {
-            fields.remove(key);
-            true
-        }
-        Some(serde_json::Value::Null) => {
-            match stored
-                .and_then(|stored| at_identity(stored, identity))
-                .filter(|kept| !unset(kept))
-            {
-                Some(kept) => {
-                    fields.insert(key.to_string(), kept.clone());
-                    true
-                }
-                None => false,
+            if required {
+                return Kept::Required;
             }
+            fields.remove(key);
+            Kept::Yes
         }
-        _ => true,
+        Some(serde_json::Value::Null) => match kept() {
+            Some(kept) => {
+                fields.insert(key.to_string(), kept);
+                Kept::Yes
+            }
+            None => Kept::NotStored,
+        },
+        None => {
+            if let Some(kept) = kept() {
+                fields.insert(key.to_string(), kept);
+            }
+            Kept::Yes
+        }
+        Some(_) => Kept::Yes,
     }
 }
 
@@ -741,7 +784,7 @@ pub fn keep_withheld(
             continue;
         };
         if let Some(serde_json::Value::Object(fields)) = at_identity_mut(value, parent)
-            && !keep(fields, key, identity, stored)
+            && keep(fields, key, identity, stored, false) != Kept::Yes
         {
             fields.remove(key);
         }
@@ -761,10 +804,11 @@ impl ConfigNamespace {
         let mut set = Vec::new();
         each_secret(
             &self.properties,
+            &[],
             value,
             "",
             &mut Vec::new(),
-            &mut |path, identity, fields, key| {
+            &mut |path, identity, fields, key, _| {
                 if let Some(secret) = fields.get_mut(key)
                     && !unset(secret)
                 {
@@ -780,33 +824,36 @@ impl ConfigNamespace {
     }
 
     /// Restores, in a value a client writes, each secret field it sends as
-    /// `null` from what `stored` holds for the same item, matched by the
+    /// `null` or leaves out from what `stored` holds for the same item, matched by the
     /// item's key field, never its position: a client that read the config
     /// back writes it unchanged, whatever items it added, removed or moved.
     /// A field sent as `{"$clear": true}` ([`CLEAR_SECRET`]) is cleared.
-    /// Refused with the paths of the `null` secrets `stored` holds nothing
-    /// for: there is no secret to keep.
+    /// Refused for each `null` secret `stored` holds nothing for (there is
+    /// no secret to keep) and each clear of a secret its object requires.
     pub fn keep_secrets(
         &self,
         value: &mut serde_json::Value,
         stored: Option<&serde_json::Value>,
-    ) -> Result<(), Vec<String>> {
-        let mut unstored = Vec::new();
+    ) -> Result<(), Vec<SecretRefusal>> {
+        let mut refused = Vec::new();
         each_secret(
             &self.properties,
+            &[],
             value,
             "",
             &mut Vec::new(),
-            &mut |path, identity, fields, key| {
-                if !keep(fields, key, identity, stored) {
-                    unstored.push(path.to_string());
-                }
+            &mut |path, identity, fields, key, required| match keep(
+                fields, key, identity, stored, required,
+            ) {
+                Kept::Yes => {}
+                Kept::NotStored => refused.push(SecretRefusal::NotStored(path.to_string())),
+                Kept::Required => refused.push(SecretRefusal::Required(path.to_string())),
             },
         );
-        if unstored.is_empty() {
+        if refused.is_empty() {
             Ok(())
         } else {
-            Err(unstored)
+            Err(refused)
         }
     }
 
@@ -831,6 +878,9 @@ impl ConfigNamespace {
     pub fn to_json_schema(&self) -> serde_json::Value {
         let mut schema = serde_json::Map::new();
         schema.insert("type".into(), "object".into());
+        if let Some(ref title) = self.title {
+            schema.insert("title".into(), title.clone().into());
+        }
         if let Some(ref desc) = self.description {
             schema.insert("description".into(), desc.clone().into());
         }
@@ -1087,11 +1137,29 @@ mod tests {
         json!({"stations": [{"name": "alpha", "token": "A"}, {"name": "beta", "token": "B"}]})
     }
 
-    fn kept(write: serde_json::Value) -> Result<serde_json::Value, Vec<String>> {
+    fn kept(write: serde_json::Value) -> Result<serde_json::Value, Vec<SecretRefusal>> {
         let mut write = write;
         stations()
             .keep_secrets(&mut write, Some(&stored_pair()))
             .map(|()| write)
+    }
+
+    #[test]
+    fn a_secret_a_write_leaves_out_is_kept_like_null() {
+        assert_eq!(
+            kept(json!({"stations": [{"name": "beta"}, {"name": "alpha"}]})),
+            Ok(json!({"stations": [
+                {"name": "beta", "token": "B"},
+                {"name": "alpha", "token": "A"},
+            ]}))
+        );
+        let mut new = json!({"stations": [{"name": "new"}]});
+        assert_eq!(
+            stations().keep_secrets(&mut new, Some(&stored_pair())),
+            Ok(()),
+            "an item with no stored secret just has none"
+        );
+        assert_eq!(new, json!({"stations": [{"name": "new"}]}));
     }
 
     #[test]
@@ -1139,12 +1207,16 @@ mod tests {
                 {"name": "renamed", "token": null},
                 {"name": "beta", "token": null},
             ]})),
-            Err(vec!["stations[0].token".to_string()])
+            Err(vec![SecretRefusal::NotStored(
+                "stations[0].token".to_string()
+            )])
         );
         let mut nothing = json!({"stations": [{"name": "alpha", "token": null}]});
         assert_eq!(
             stations().keep_secrets(&mut nothing, None),
-            Err(vec!["stations[0].token".to_string()])
+            Err(vec![SecretRefusal::NotStored(
+                "stations[0].token".to_string()
+            )])
         );
     }
 
@@ -1166,6 +1238,26 @@ mod tests {
         assert_eq!(
             extra["stations"][0]["token"],
             json!({"$clear": true, "x": 1})
+        );
+    }
+
+    #[test]
+    fn a_secret_its_item_requires_is_never_cleared() {
+        let mut ns = stations();
+        ns.properties
+            .get_mut("stations")
+            .and_then(|stations| stations.items.as_mut())
+            .expect("items")
+            .required = Some(vec!["name".into(), "token".into()]);
+        let mut write = json!({"stations": [
+            {"name": "alpha", "token": {"$clear": true}},
+            {"name": "beta", "token": null},
+        ]});
+        assert_eq!(
+            ns.keep_secrets(&mut write, Some(&stored_pair())),
+            Err(vec![SecretRefusal::Required(
+                "stations[0].token".to_string()
+            )])
         );
     }
 

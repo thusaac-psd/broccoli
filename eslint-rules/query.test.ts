@@ -27,6 +27,10 @@ test('a query read with a fallback renders its state', () => {
         'const { data: rows, isError } = useQuery(o); const xs = rows ?? [];',
         'const { data, error } = useQuery(o); const xs = data ?? [];',
         'const { data: rows } = useQuery(o); const n = rows?.length;',
+        'const q = useQuery(o); const s = useQueryState(q); const { data } = q; const xs = data ?? [];',
+        'const { data: rows, error } = useQuery(o); const xs = rows?.items ?? [];',
+        'const { isError, ...rest } = useQuery(o); const xs = rest.data ?? [];',
+        'const xs = useQuery(o).data;',
       ],
       invalid: [
         'const q = useQuery(o); const xs = q.data ?? [];',
@@ -35,6 +39,11 @@ test('a query read with a fallback renders its state', () => {
         'const { data: rows } = useQuery(o); const xs = rows ?? [];',
         'const { data } = useQuery(o); const xs = data || [];',
         'const { data: rows = [] } = useQuery(o);',
+        'const xs = useQuery(o).data ?? [];',
+        'const q = useQuery(o); const { data } = q; const xs = data ?? [];',
+        'const { data: rows } = useQuery(o); const xs = rows?.items ?? [];',
+        'const { isLoading, ...rest } = useQuery(o); const xs = rest.data ?? [];',
+        'const q = useQuery(o); const xs = q.data?.items ?? [];',
       ].map((code) => ({ code, errors: [{ messageId: 'defaulted' }] })),
     },
   );

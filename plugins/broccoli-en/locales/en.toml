@@ -999,6 +999,8 @@
 'config.moveUp' = "Move up"
 'config.moveDown' = "Move down"
 'config.itemNumber' = "Item {n}"
+'config.yes' = "Yes"
+'config.no' = "No"
 
 # Language switcher
 'locale.switch' = "Language"
@@ -1115,6 +1117,8 @@
 'config.validation.unknownField' = "This setting does not exist"
 'config.validation.required' = "Required"
 'config.validation.secretNotStored' = "No secret is stored for this item. Enter it again."
+'config.validation.secretRequired' = "This secret is required. Enter a new one to replace it."
+'config.validation.duplicateKey' = "Another item is already named {value}."
 'config.blob.default' = "Default"
 'config.blob.replaceLabel' = "Replace {name}"
 'config.blob.replace' = "Replace"

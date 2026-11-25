@@ -51,6 +51,9 @@ export const pluginKeys = {
   description: (pluginId: string) => `plugin.${pluginId}.description`,
   configDescription: (pluginId: string, namespace: string) =>
     `config.${pluginId}.${namespace}.description`,
+  /** A config namespace's short title, which labels its tab. */
+  configTitle: (pluginId: string, namespace: string) =>
+    `config.${pluginId}.${namespace}.title`,
   /**
    * A schema field's title, description or unit. The key names the field as the
    * schema declares it, so the fields of every item of an array share one

@@ -141,6 +141,7 @@ mod tests {
             config: HashMap::from([(
                 "settings".into(),
                 ConfigNamespace {
+                    title: None,
                     description: Some("External".into()),
                     scopes: vec![ConfigScope::Plugin],
                     schema: Some("config/settings.schema.toml".into()),
@@ -187,6 +188,7 @@ mod tests {
             config: HashMap::from([(
                 "evil".into(),
                 ConfigNamespace {
+                    title: None,
                     description: None,
                     scopes: vec![ConfigScope::Plugin],
                     schema: Some("../secret.toml".into()),

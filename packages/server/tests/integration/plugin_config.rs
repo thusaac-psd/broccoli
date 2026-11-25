@@ -314,9 +314,149 @@ mod clear_secret {
         assert_eq!(saved["secrets"], json!(["token"]), "{saved}");
         let kept = save(json!({ "token": null })).await;
         assert_eq!(kept["secrets"], json!(["token"]), "null keeps it: {kept}");
+        let left_out = save(json!({ "from": "a file without the secret" })).await;
+        assert_eq!(
+            left_out["secrets"],
+            json!(["token"]),
+            "a write that leaves the secret out keeps it too: {left_out}"
+        );
         let cleared = save(json!({ "token": { "$clear": true } })).await;
         assert_eq!(cleared["secrets"], json!([]), "{cleared}");
         assert_eq!(cleared["config"], json!({}), "{cleared}");
+    }
+}
+
+/// A secret its item requires is never cleared: the marker is refused with
+/// its own error, so the form can say to replace it instead.
+mod required_secret {
+    use super::*;
+
+    #[tokio::test]
+    async fn clearing_a_required_secret_is_refused_with_its_own_error() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("required_secret_admin", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "keyed");
+        let res = app
+            .put_with_token(
+                &path,
+                &json!({ "config": { "stations": [{ "name": "desk", "token": "t" }] } }),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        let res = app
+            .put_with_token(
+                &path,
+                &json!({ "config": { "stations": [
+                    { "name": "desk", "token": { "$clear": true } },
+                ] } }),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        let field = &res.body["details"]["fields"][0];
+        assert_eq!(field["path"], "stations[0].token", "{}", res.text);
+        assert_eq!(field["kind"], "secret_required", "{}", res.text);
+
+        let res = app.get_with_token(&path, &admin).await;
+        assert_eq!(
+            res.body["secrets"],
+            json!(["stations[0].token"]),
+            "a refused clear keeps the secret: {}",
+            res.text
+        );
+    }
+}
+
+/// A save reads the stored secrets it keeps under the row's lock, so a save
+/// that keeps a secret while another rotates it waits for the rotation and
+/// keeps the new secret, never reverting it.
+mod concurrent_secret {
+    use super::*;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_save_that_keeps_a_secret_waits_for_a_rotation_in_flight() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("concurrent_secret_admin", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "bundled");
+        let res = app
+            .put_with_token(&path, &json!({ "config": { "token": "old" } }), &admin)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        // The test's own connections, beside the server's pool.
+        let own = sea_orm::Database::connect(app.database.url())
+            .await
+            .unwrap();
+        // A rotation in flight: the row is locked and holds the new token.
+        let rotation = own.begin().await.unwrap();
+        rotation
+            .execute_unprepared(&format!(
+                "UPDATE plugin_config SET config = '{{\"token\": \"rotated\"}}' \
+                 WHERE scope = 'problem' AND ref_id = '{problem_id}' \
+                 AND namespace = 'server-plugin:bundled'"
+            ))
+            .await
+            .unwrap();
+
+        let keep = {
+            let (url, admin, client) = (app.url(&path), admin.clone(), app.client.clone());
+            tokio::spawn(async move {
+                client
+                    .put(url)
+                    .bearer_auth(admin)
+                    .json(&json!({ "config": { "token": null, "from": "kept" } }))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16()
+            })
+        };
+        // The save waits on the rotation's row lock.
+        loop {
+            let waiting = own
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    "SELECT count(*) AS n FROM pg_stat_activity \
+                     WHERE wait_event_type = 'Lock' AND datname = current_database()",
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "n")
+                .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        rotation.commit().await.unwrap();
+        assert_eq!(keep.await.unwrap(), 200);
+
+        let stored = own
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                format!(
+                    "SELECT config->>'token' AS v FROM plugin_config \
+                     WHERE scope = 'problem' AND ref_id = '{problem_id}' \
+                     AND namespace = 'server-plugin:bundled'"
+                ),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<String>("", "v")
+            .unwrap();
+        assert_eq!(stored, "rotated", "the save keeps the rotated token");
     }
 }
 

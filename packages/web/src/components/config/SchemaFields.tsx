@@ -21,6 +21,7 @@ export function SchemaFields({
   hasExplicitDescendant,
   isDirty,
   inherited,
+  inNewItem = false,
 }: Readonly<{
   schema: JsonSchema;
   values: Record<string, unknown>;
@@ -35,6 +36,9 @@ export function SchemaFields({
   hasExplicitDescendant: (path: string[]) => boolean;
   isDirty?: (path: string[]) => boolean;
   inherited?: InheritedConfig;
+  /** Whether these fields belong to an array item added since the form
+   * loaded, whose secrets are none of a stored item's. */
+  inNewItem?: boolean;
 }>) {
   if (!schema.properties) return null;
 
@@ -75,6 +79,8 @@ export function SchemaFields({
                   hasExplicitDescendant={hasExplicitDescendant}
                   isDirty={isDirty}
                   inherited={inherited}
+                  required={schema.required?.includes(key) ?? false}
+                  inNewItem={inNewItem}
                 />
               </div>
             );
@@ -100,6 +106,8 @@ export function SchemaFields({
           hasExplicitDescendant={hasExplicitDescendant}
           isDirty={isDirty}
           inherited={inherited}
+          required={schema.required?.includes(key) ?? false}
+          inNewItem={inNewItem}
         />
       ))}
     </div>

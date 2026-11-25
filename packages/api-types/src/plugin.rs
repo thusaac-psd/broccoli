@@ -282,6 +282,12 @@ pub enum FieldErrorKind {
     /// names holds: a new item, or one whose key field changed. Its secret
     /// is entered again.
     SecretNotStored,
+    /// A write clears (`{"$clear": true}`) a secret its item requires. The
+    /// secret is replaced with a new one instead.
+    SecretRequired,
+    /// Another item of the array already has this value in the array's key
+    /// field, which names one item.
+    DuplicateKey { value: serde_json::Value },
     /// The plugin's own `validate` function refuses the value. `key`, when
     /// present, is a key of that plugin's language pack and `params` the
     /// values its message names; without it, `message` is all there is.
@@ -308,6 +314,12 @@ impl std::fmt::Display for FieldErrorKind {
             Self::MinLength { limit } => write!(f, "must be at least {limit} characters"),
             Self::MaxLength { limit } => write!(f, "must be at most {limit} characters"),
             Self::Pattern { pattern } => write!(f, "must match the pattern {pattern}"),
+            Self::DuplicateKey { value } => {
+                write!(f, "another item already has the key {value}")
+            }
+            Self::SecretRequired => {
+                f.write_str("this secret is required: replace it instead of clearing it")
+            }
             Self::SecretNotStored => {
                 f.write_str("no secret is stored for this item: enter it again")
             }
@@ -321,6 +333,16 @@ impl std::fmt::Display for FieldErrorKind {
             },
         }
     }
+}
+
+/// What a config write sends in place of a secret field's value to clear
+/// it: `{"$clear": true}`. Sending `null`, or leaving the field out, keeps
+/// the stored secret; a string replaces it. Clients build the marker from
+/// this schema, so its shape has one source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ClearSecret {
+    #[serde(rename = "$clear")]
+    pub clear: bool,
 }
 
 /// A config its plugin finds something wrong with: a stored config it would
@@ -391,6 +413,14 @@ impl IncompatibleConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clear_marker_schema_is_the_marker_the_host_reads() {
+        assert_eq!(
+            serde_json::to_value(ClearSecret { clear: true }).unwrap(),
+            serde_json::json!({ broccoli_types::manifest::CLEAR_SECRET: true })
+        );
+    }
 
     fn summary(current: Option<PublishedPluginResponse>) -> PluginArchiveSummary {
         PluginArchiveSummary {
