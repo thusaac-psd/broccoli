@@ -5,6 +5,7 @@ import {
   getStatusLabel,
   SUBMISSION_STATUS_FILTER_OPTIONS,
   type SubmissionStatusFilterValue,
+  submissionViewKeys,
   toSubmissionStatus,
 } from '@broccoli/web-sdk/submission';
 import {
@@ -142,15 +143,15 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
     status: toSubmissionStatus(appliedStatus),
   };
   const submissionsQuery = useQuery({
-    queryKey: [
-      'contest-submissions-table',
+    queryKey: submissionViewKeys.list(
+      'contest',
       String(contestId),
       String(appliedProblemId ?? 'all'),
       String(appliedLanguage ?? 'all'),
       appliedStatus,
       pages.cursor,
       viewerKey,
-    ],
+    ),
     enabled: !!user,
     queryFn: () =>
       fetchContestSubmissions(apiClient, {
@@ -163,7 +164,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
   });
 
   const bulk = useBulkRejudge({
-    listKey: ['contest-submissions-table', String(contestId)],
+    listKey: submissionViewKeys.list('contest', String(contestId)),
     filterKey: ['contest', filters],
     fetchMatching: () =>
       fetchAllPages((cursor) =>

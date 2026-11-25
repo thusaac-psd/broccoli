@@ -1,6 +1,7 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { SUBMISSION_VIEW_ALL } from '@broccoli/web-sdk/permissions';
+import { submissionViewKeys } from '@broccoli/web-sdk/submission';
 import { useQuery } from '@tanstack/react-query';
 
 /**
@@ -17,7 +18,7 @@ export function useJudgementConfigIssues(
   const enabled =
     judgementId != null && !!user?.permissions.includes(SUBMISSION_VIEW_ALL);
   const { data } = useQuery({
-    queryKey: ['submission-judgement', submissionId, judgementId],
+    queryKey: submissionViewKeys.judgement(submissionId, judgementId),
     queryFn: async () => {
       const { data, error } = await apiClient.GET(
         '/submissions/{id}/judgements/{judgement_id}',

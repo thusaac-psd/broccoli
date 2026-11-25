@@ -4,6 +4,7 @@ import {
   getStatusLabel,
   SUBMISSION_STATUS_FILTER_OPTIONS,
   type SubmissionStatusFilterValue,
+  submissionViewKeys,
   toSubmissionStatus,
 } from '@broccoli/web-sdk/submission';
 import { FilterDropdown, Input, QueryView } from '@broccoli/web-sdk/ui';
@@ -112,13 +113,13 @@ export function AllSubmissions() {
     status: toSubmissionStatus(appliedStatus),
   };
   const submissionsQuery = useQuery({
-    queryKey: [
-      'admin-submissions-table',
+    queryKey: submissionViewKeys.list(
+      'admin',
       appliedQ,
       String(appliedLanguage ?? 'all'),
       appliedStatus,
       pages.cursor,
-    ],
+    ),
     queryFn: () =>
       fetchSubmissions(apiClient, {
         ...filters,
@@ -130,7 +131,7 @@ export function AllSubmissions() {
   });
 
   const bulk = useBulkRejudge({
-    listKey: ['admin-submissions-table'],
+    listKey: submissionViewKeys.list('admin'),
     filterKey: ['all', filters],
     fetchMatching: () =>
       fetchAllPages((cursor) =>

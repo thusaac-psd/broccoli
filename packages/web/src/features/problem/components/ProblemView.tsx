@@ -14,6 +14,7 @@ import {
 } from '@broccoli/web-sdk/problem';
 import type { SubmissionSummary } from '@broccoli/web-sdk/submission';
 import {
+  submissionViewKeys,
   SubmitGatingProvider,
   useSubmitGate,
 } from '@broccoli/web-sdk/submission';
@@ -162,7 +163,12 @@ export default function ProblemView({
   const contestProblems = useContestProblems(contestId).data ?? [];
 
   const historyQuery = useQuery<SubmissionSummary[]>({
-    queryKey: ['problem-recent-submissions', contestId, problemId, user?.id],
+    queryKey: submissionViewKeys.list(
+      'problem-recent',
+      contestId,
+      problemId,
+      user?.id,
+    ),
     enabled: Number.isFinite(problemId) && !!user,
     queryFn: async () => {
       if (!user) return [];

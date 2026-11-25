@@ -2,6 +2,7 @@ import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { SUBMISSION_VIEW_ALL } from '@broccoli/web-sdk/permissions';
+import { submissionViewKeys } from '@broccoli/web-sdk/submission';
 import {
   Badge,
   Button,
@@ -64,7 +65,7 @@ export default function OverviewPage() {
   });
 
   const submissionsQuery = useQuery({
-    queryKey: ['overview-submissions', user?.id],
+    queryKey: submissionViewKeys.list('overview', user?.id),
     enabled: !!user,
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/submissions', {
