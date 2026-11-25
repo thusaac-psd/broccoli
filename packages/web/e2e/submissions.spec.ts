@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, type Page, test } from '@playwright/test';
 
 import {
   cursorPage,
@@ -407,12 +407,16 @@ test('a token unlocks a hidden IOI result where the problem page shows it, witho
   await expect(page.getByText('Accepted').first()).toBeVisible();
 });
 
-test('a token at subtask scores shows the test case rows of the submission it unlocks', async ({
-  page,
-}, info) => {
-  test.skip(info.project.name === 'phone', 'the sidebar is a sheet there');
+/** Whether the viewer spent its token on submission 9. */
+type TokenState = { tokened: boolean };
+
+/**
+ * Serves `page` an IOI contest at feedback `subtask_scores` with one token
+ * and submission 9, whose test case rows read redacted until `state` says
+ * the token is spent on it.
+ */
+async function serveTokenAtSubtaskScores(page: Page, state: TokenState) {
   await mockApi(page, 'contestant', { plugins: ['ioi'] });
-  let tokened = false;
   const judged = {
     ...submission(9, 2, 'Accepted'),
     contest_id: 4,
@@ -452,7 +456,9 @@ test('a token at subtask scores shows the test case rows of the submission it un
   );
   // Test case rows are redacted at subtask scores until a token unlocks them.
   const rows = () =>
-    tokened ? [row] : [{ ...row, verdict: null, score: null, time_used: null }];
+    state.tokened
+      ? [row]
+      : [{ ...row, verdict: null, score: null, time_used: null }];
   await page.route(/\/api\/v1\/submissions\/9(\?|$)/, (route) =>
     route.fulfill({
       json: {
@@ -524,22 +530,29 @@ test('a token at subtask scores shows the test case rows of the submission it un
     route.fulfill({
       json: {
         mode: 'fixed_budget',
-        available: tokened ? 0 : 1,
-        used: tokened ? 1 : 0,
+        available: state.tokened ? 0 : 1,
+        used: state.tokened ? 1 : 0,
         total: 1,
         next_regen_at: null,
-        tokened_submission_ids: tokened ? [9] : [],
-        usable_submissions: tokened
+        tokened_submission_ids: state.tokened ? [9] : [],
+        usable_submissions: state.tokened
           ? []
           : [{ submission_id: 9, problem_id: 1 }],
       },
     }),
   );
   await page.route(`${IOI}/submissions/9/token`, (route) => {
-    tokened = true;
+    state.tokened = true;
     return route.fulfill({ json: { remaining_tokens: 0 } });
   });
+}
 
+test('a token at subtask scores shows the test case rows of the submission it unlocks', async ({
+  page,
+}, info) => {
+  test.skip(info.project.name === 'phone', 'the sidebar is a sheet there');
+  const state = { tokened: false };
+  await serveTokenAtSubtaskScores(page, state);
   // The submission's own page shows its test case rows redacted.
   await page.goto('/submissions/9');
   await expect(page.getByText('Test Case #1')).toBeVisible();
@@ -562,4 +575,26 @@ test('a token at subtask scores shows the test case rows of the submission it un
   });
   await expect(page.getByText('Test Case #1')).toBeVisible();
   await expect(page.getByText(/37\s?ms/).first()).toBeVisible();
+});
+
+test('a token spent in one tab shows the result in another tab already open on it', async ({
+  page,
+}, info) => {
+  test.skip(info.project.name === 'phone', 'one check of the tabs is enough');
+  const state = { tokened: false };
+  await serveTokenAtSubtaskScores(page, state);
+  // The other tab shows the redacted rows and polls no more: the outcome
+  // it may see is final.
+  const other = await page.context().newPage();
+  await serveTokenAtSubtaskScores(other, state);
+  await other.goto('/submissions/9');
+  await expect(other.getByText('Test Case #1')).toBeVisible();
+  await expect(other.getByText(/37\s?ms/)).toHaveCount(0);
+
+  await page.goto('/contests/4/problems/1?tab=coding');
+  await page
+    .getByRole('button', { name: 'Use a token on submission #9' })
+    .click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(other.getByText(/37\s?ms/).first()).toBeVisible();
 });
