@@ -419,7 +419,10 @@ async fn a_database_the_released_build_ran_upgrades_to_this_build() {
         "a disabled plugin still closes the contest types it governed"
     );
     assert!(
-        governs.provides.languages.is_empty() && governs.unchecked_problem_types.is_empty(),
+        governs.provides.languages.is_empty()
+            && governs.unchecked_problem_types.is_empty()
+            && governs.hooks.is_empty()
+            && governs.judging_inputs.is_empty(),
         "a key the released build did not record reads as none"
     );
 

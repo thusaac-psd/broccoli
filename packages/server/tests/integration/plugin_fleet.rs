@@ -1328,7 +1328,7 @@ async fn a_problem_whose_languages_are_all_disabled_names_the_language_plugin() 
         .await;
     for sql in [
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('off-languages', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [], \"languages\": [\"closed-lang\"], \"unchecked_problem_types\": []}')"
+         ('off-languages', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [], \"languages\": [\"closed-lang\"], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
             .to_string(),
         format!(
             "UPDATE problem SET submission_format = '{{\"closed-lang\": [\"main.x\"]}}' \
@@ -1341,7 +1341,8 @@ async fn a_problem_whose_languages_are_all_disabled_names_the_language_plugin() 
     }
     plugin_lifecycle::reconcile(&a.state).await.unwrap();
 
-    let closed = json!({"plugin_id": "off-languages", "provides": "language"});
+    let closed =
+        json!({"plugin_id": "off-languages", "provides": "language", "reason": "disabled"});
     for route in [
         routes::problem(problem_id),
         routes::contest_problem(contest_id, problem_id),
