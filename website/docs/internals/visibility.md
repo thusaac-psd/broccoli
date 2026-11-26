@@ -154,12 +154,14 @@ Degrading is per resource and per field, never per batch:
   (`AppState::known_keys`), never this replica's registries alone: a key
   whose plugin is out is refused by why, as above, never as unknown, and a
   refusal of an unknown key lists closed keys apart from the supported ones.
-- Outside a contest, a problem part or a submission is blind only to a
-  plugin some replica enforces (it is missing here while another serves it,
-  or this replica is loading it). A plugin disabled or loaded nowhere is
-  enforced by no replica, so it governs only what is read through its own
-  contests, and a practice submission, judged under its problem's own
-  default contest type, is never blind to another contest's type.
+- Outside a contest, a problem part or a submission is blind to every
+  enabled plugin that cannot answer (loaded nowhere, missing here, loading)
+  that governs one of its problem's contests: such a plugin may hide the
+  problem there, and its failing never shows it, so the read fails closed,
+  naming the plugin. Only a plugin an administrator disabled governs no more
+  than what is read through its own contests. A practice submission, judged
+  under its problem's own default contest type, is never blind to another
+  contest's type.
 
 `ContestResponse.plugin_outage` and `ContestListItem.plugin_outage` come from
 `plugin_lifecycle::contest_type_outage`: the contest's type is closed
