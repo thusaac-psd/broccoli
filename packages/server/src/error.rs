@@ -468,7 +468,7 @@ impl AppError {
                     HostCode::PluginNotLoadedHere,
                     format!(
                         "The plugin '{plugin_id}' is not loaded on this server; another server \
-                         serves it, and a retry is sent there"
+                         serves it. Try again in a moment, on a server that serves it"
                     ),
                     plugin_id,
                 ),
