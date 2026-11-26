@@ -1,7 +1,13 @@
-import { parseApiError, useApiClient } from '@broccoli/web-sdk/api';
+import {
+  type ApiSchemas,
+  errorCodeKey,
+  parseApiError,
+  useApiClient,
+} from '@broccoli/web-sdk/api';
 import { loadedData, useQueryState } from '@broccoli/web-sdk/hooks';
 import {
   pluginKeys,
+  pluginName,
   usePluginText,
   useTranslation,
 } from '@broccoli/web-sdk/i18n';
@@ -28,20 +34,21 @@ import { ConfigForm } from './ConfigForm';
 import type { ConfigScope, InheritedConfig } from './types';
 
 type ConfigSchemaResponse = PluginDetail['config_schemas'][number];
+
+/**
+ * A plugin's settings the dialog shows: its namespaces' schemas, or, when
+ * this server does not serve the plugin, the code its routes answer
+ * (`unavailable`), which the dialog says in place of the form.
+ */
+interface PluginSettings {
+  pluginId: string;
+  schemas: ConfigSchemaResponse[];
+  unavailable?: string;
+}
 type PluginDetailResponse = PluginDetail;
 
-/** A config entry returned by resource-scoped config list endpoints.
- *  Mirrors the generated `PluginConfigResponse` schema shape. */
-interface ConfigEntry {
-  plugin_id: string;
-  namespace: string;
-  config: unknown;
-  enabled?: boolean | null;
-  position: number;
-  updated_at?: string | null;
-  json_schema?: unknown;
-  description?: string | null;
-}
+/** A config entry returned by resource-scoped config list endpoints. */
+type ConfigEntry = ApiSchemas['PluginConfigResponse'];
 
 /** The enabled toggle's "inherit from the parent scope" option. */
 const INHERIT = 'unset';
@@ -58,10 +65,7 @@ export interface ResourceConfigDialogProps {
 // below and re-firing every effect that depends on them.
 const EMPTY_PLUGIN_DETAILS: PluginDetailResponse[] = [];
 const EMPTY_CONFIG_ENTRIES: ConfigEntry[] = [];
-const EMPTY_PLUGIN_SCHEMAS: {
-  pluginId: string;
-  schemas: ConfigSchemaResponse[];
-}[] = [];
+const EMPTY_PLUGIN_SCHEMAS: PluginSettings[] = [];
 
 function buildConfigCallbacks(
   apiClient: ReturnType<typeof useApiClient>,
@@ -351,16 +355,25 @@ function configListQueryKey(scope: ConfigScope): string[] {
   }
 }
 
-/** Convert config list entries into the pluginsWithSchemas structure the dialog expects. */
+/**
+ * Convert config list entries into the pluginsWithSchemas structure the
+ * dialog expects. A plugin this server does not serve keeps its tab, which
+ * says why in place of its settings.
+ */
 function configEntriesToPluginSchemas(
   entries: ConfigEntry[],
-): { pluginId: string; schemas: ConfigSchemaResponse[] }[] {
-  const byPlugin = new Map<
-    string,
-    { pluginId: string; schemas: ConfigSchemaResponse[] }
-  >();
+): PluginSettings[] {
+  const byPlugin = new Map<string, PluginSettings>();
 
   for (const entry of entries) {
+    if (entry.unavailable) {
+      byPlugin.set(entry.plugin_id, {
+        pluginId: entry.plugin_id,
+        schemas: [],
+        unavailable: entry.unavailable,
+      });
+      continue;
+    }
     if (!entry.json_schema) continue;
 
     if (!byPlugin.has(entry.plugin_id)) {
@@ -406,12 +419,14 @@ function usePluginScopeSchemas(
     if (scopePluginId === null) return EMPTY_PLUGIN_SCHEMAS;
     return plugins
       .filter((p: PluginDetailResponse) => p.id === scopePluginId)
-      .map((p: PluginDetailResponse) => ({
-        pluginId: p.id,
-        schemas: p.config_schemas.filter((s: ConfigSchemaResponse) =>
-          s.scopes.includes('plugin'),
-        ),
-      }))
+      .map(
+        (p: PluginDetailResponse): PluginSettings => ({
+          pluginId: p.id,
+          schemas: p.config_schemas.filter((s: ConfigSchemaResponse) =>
+            s.scopes.includes('plugin'),
+          ),
+        }),
+      )
       .filter((e: { schemas: ConfigSchemaResponse[] }) => e.schemas.length > 0);
   }, [plugins, scopePluginId]);
   return { schemas, query };
@@ -498,14 +513,18 @@ export function ResourceConfigDialog({
               {t('config.noSchemas')}
             </div>
           ) : pluginsWithSchemas.length === 1 ? (
-            <SinglePluginContent
-              pluginId={pluginsWithSchemas[0].pluginId}
-              schemas={pluginsWithSchemas[0].schemas}
-              apiClient={apiClient}
-              scope={scope}
-              open={open}
-              invalidateKeys={invalidateKeys}
-            />
+            pluginsWithSchemas[0].unavailable ? (
+              <UnavailableNotice settings={pluginsWithSchemas[0]} />
+            ) : (
+              <SinglePluginContent
+                pluginId={pluginsWithSchemas[0].pluginId}
+                schemas={pluginsWithSchemas[0].schemas}
+                apiClient={apiClient}
+                scope={scope}
+                open={open}
+                invalidateKeys={invalidateKeys}
+              />
+            )
           ) : (
             <Tabs
               value={activePlugin}
@@ -528,16 +547,20 @@ export function ResourceConfigDialog({
               </TabsList>
               {pluginsWithSchemas.map((entry) => (
                 <TabsContent key={entry.pluginId} value={entry.pluginId}>
-                  <SinglePluginContent
-                    pluginId={entry.pluginId}
-                    schemas={entry.schemas}
-                    apiClient={apiClient}
-                    scope={scope}
-                    open={open && activePlugin === entry.pluginId}
-                    invalidateKeys={invalidateKeys}
-                    activeNamespace={activeNamespace}
-                    onNamespaceChange={setActiveNamespace}
-                  />
+                  {entry.unavailable ? (
+                    <UnavailableNotice settings={entry} />
+                  ) : (
+                    <SinglePluginContent
+                      pluginId={entry.pluginId}
+                      schemas={entry.schemas}
+                      apiClient={apiClient}
+                      scope={scope}
+                      open={open && activePlugin === entry.pluginId}
+                      invalidateKeys={invalidateKeys}
+                      activeNamespace={activeNamespace}
+                      onNamespaceChange={setActiveNamespace}
+                    />
+                  )}
                 </TabsContent>
               ))}
             </Tabs>
@@ -545,6 +568,27 @@ export function ResourceConfigDialog({
         </div>
       </SheetContent>
     </Sheet>
+  );
+}
+
+/**
+ * Why this server shows none of a plugin's settings, in the words of the
+ * code its config routes answer here, naming the plugin.
+ */
+function UnavailableNotice({ settings }: { settings: PluginSettings }) {
+  const { t, lookup } = useTranslation();
+  const plugin = pluginName(lookup, settings.pluginId);
+  const text =
+    (settings.unavailable &&
+      lookup(errorCodeKey(settings.unavailable), { plugin })) ||
+    t('config.loadFailed');
+  return (
+    <div
+      role="status"
+      className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-300"
+    >
+      {text}
+    </div>
   );
 }
 

@@ -194,6 +194,7 @@ pub async fn delete_checker_source(
     };
     match delete_config(
         &state.db,
+        SchemaSource::of(&state),
         &ConfigTarget::problem(id),
         &owner.plugin_id,
         &owner.namespace,

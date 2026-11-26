@@ -189,3 +189,11 @@ judging_input = true
 
 [config.judged.properties.level]
 type = "integer"
+
+# A config every scope stores, for the routes of each scope.
+[config.anywhere]
+description = "Fixture config at every scope"
+scopes = ["plugin", "problem", "contest", "contest_problem"]
+
+[config.anywhere.properties.level]
+type = "integer"

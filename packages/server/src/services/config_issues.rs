@@ -70,8 +70,8 @@ use crate::error::AppError;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::registry::TypeProviders;
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, Findings, IncompatibleConfig, Reads, check_config, declared,
-    labelled,
+    ConfigScope, ConfigTarget, Findings, IncompatibleConfig, Reads, SchemaSource, check_config,
+    declared, labelled,
 };
 use crate::state::AppState;
 
@@ -204,10 +204,12 @@ impl Outcome {
 
 /// Every config of `subject` its plugin finds something wrong with, as
 /// things stand, as the API lists them ([`issues_of`]). A subject a plugin
-/// not loaded here would check has no answer here: `PLUGIN_UNAVAILABLE`.
+/// not loaded here would check has no answer here: the answer every config
+/// route gives for that plugin ([`SchemaSource::served_here`]), naming it.
 pub(crate) async fn config_issues<C: ConnectionTrait>(
     db: &C,
     checker: &ConfigChecker<'_>,
+    schemas: SchemaSource<'_>,
     subject: Subject,
     reads: Reads<'_>,
 ) -> Result<Vec<IncompatibleConfig>, AppError> {
@@ -218,7 +220,11 @@ pub(crate) async fn config_issues<C: ConnectionTrait>(
             undecided = ?outcome.undecided,
             "config issues are unknown here: a plugin that checks them is not loaded"
         );
-        return Err(AppError::PluginUnavailable);
+        return Err(outcome
+            .undecided
+            .iter()
+            .find_map(|plugin_id| schemas.served_here(plugin_id).err())
+            .map_or(AppError::PluginUnavailable, AppError::from));
     }
     labelled(db, outcome.issues.iter().map(ConfigIssue::listed).collect()).await
 }

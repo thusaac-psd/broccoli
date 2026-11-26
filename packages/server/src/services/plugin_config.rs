@@ -164,16 +164,53 @@ pub(crate) fn declared(
         .cloned()
 }
 
+/// Why this replica serves none of a plugin's configs
+/// ([`SchemaSource::served_here`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NotServed {
+    /// It is not loaded here: disabled, loaded on no live server, served by
+    /// another, or loading (`PluginLifecycle::outage`).
+    Outage(broccoli_api_types::visibility::PluginOutage),
+    /// It is loaded here at a version that is not the one the fleet
+    /// published, which may not mark the published one's secrets.
+    Outdated(String),
+}
+
+impl From<NotServed> for AppError {
+    fn from(not_served: NotServed) -> Self {
+        match not_served {
+            NotServed::Outage(outage) => outage.into(),
+            NotServed::Outdated(plugin_id) => AppError::PluginOutdatedHere(plugin_id),
+        }
+    }
+}
+
+impl NotServed {
+    /// The code a config route answers with (`apiError.<CODE>` names the
+    /// plugin in the client's language).
+    pub(crate) fn code(&self) -> broccoli_api_types::error::HostCode {
+        use broccoli_api_types::error::HostCode;
+        use broccoli_api_types::visibility::PluginOutage;
+        match self {
+            NotServed::Outage(PluginOutage::Disabled { .. }) => HostCode::PluginDisabled,
+            NotServed::Outage(PluginOutage::NotLoaded { .. }) => HostCode::PluginNotLoaded,
+            NotServed::Outage(PluginOutage::NotLoadedHere { .. }) => HostCode::PluginNotLoadedHere,
+            NotServed::Outage(PluginOutage::Unavailable) => HostCode::PluginUnavailable,
+            NotServed::Outdated(_) => HostCode::PluginOutdatedHere,
+        }
+    }
+}
+
 /// The schemas a read shows configs by and a write stores them by: this
 /// replica's registry, trusted for a plugin only while this replica serves
-/// the version the fleet published (`PluginLifecycle::serves_published`).
-/// An outdated replica's manifest may lack a field the published one marks
-/// secret, so a read there shows nothing of the plugin's configs, and a
-/// write there is refused ([`SchemaSource::writable`]).
+/// it ([`SchemaSource::served_here`]). Every config route reads, writes and
+/// deletes through it, so none acts on a plugin's configs by a schema this
+/// replica lacks, or one that may not mark the published version's
+/// secrets.
 #[derive(Clone, Copy)]
 pub(crate) struct SchemaSource<'a> {
     registry: &'a PluginRegistry,
-    lifecycle: Option<&'a crate::plugin_lifecycle::PluginLifecycle>,
+    lifecycle: &'a crate::plugin_lifecycle::PluginLifecycle,
 }
 
 impl<'a> SchemaSource<'a> {
@@ -183,42 +220,48 @@ impl<'a> SchemaSource<'a> {
     }
 
     /// The schemas of `registry`, trusted for the plugins `lifecycle` says
-    /// this replica serves at their published version.
+    /// this replica serves.
     pub(crate) fn serving(
         registry: &'a PluginRegistry,
         lifecycle: &'a crate::plugin_lifecycle::PluginLifecycle,
     ) -> Self {
         Self {
             registry,
-            lifecycle: Some(lifecycle),
+            lifecycle,
         }
     }
 
-    /// Refuses a write of `plugin_id`'s configs on a replica that does not
-    /// serve the plugin's published version
-    /// ([`AppError::PluginOutdatedHere`]): the schema it knows may not mark
-    /// a field the published one marks secret, so a write by it could drop
-    /// a stored secret, or answer one in clear. The client retries on a
-    /// replica that serves it, or once this one does.
-    pub(crate) fn writable(&self, plugin_id: &str) -> Result<(), AppError> {
-        match self.lifecycle {
-            Some(lifecycle) if !lifecycle.serves_published(plugin_id) => {
-                Err(AppError::PluginOutdatedHere(plugin_id.to_string()))
+    /// The one rule every config route answers by for `plugin_id`: served
+    /// while it is loaded here at the version the fleet published, else why
+    /// not, by the lifecycle's one account of a plugin that is out
+    /// (`PluginLifecycle::outage`): disabled, loaded on no live server,
+    /// served by another, or loading; or loaded here at another version. A
+    /// plugin no server knows is left to the namespace checks, which find
+    /// no such namespace.
+    pub(crate) fn served_here(&self, plugin_id: &str) -> Result<(), NotServed> {
+        let status = self
+            .registry
+            .read()
+            .ok()
+            .and_then(|registry| registry.get(plugin_id).map(|entry| entry.status.clone()));
+        match status {
+            Some(plugin_core::registry::PluginStatus::Loaded) => {
+                if self.lifecycle.serves_published(plugin_id) {
+                    Ok(())
+                } else {
+                    Err(NotServed::Outdated(plugin_id.to_string()))
+                }
             }
-            _ => Ok(()),
+            None if !self.lifecycle.is_known(plugin_id) => Ok(()),
+            _ => Err(NotServed::Outage(self.lifecycle.outage(plugin_id))),
         }
     }
 
     /// The namespace a read may show `plugin_id`'s configs of `namespace`
     /// by; `None` when no schema for it is known here, or this replica does
-    /// not serve the plugin's published version.
+    /// not serve the plugin ([`Self::served_here`]).
     pub(crate) fn namespace(&self, plugin_id: &str, namespace: &str) -> Option<ConfigNamespace> {
-        if self
-            .lifecycle
-            .is_some_and(|lifecycle| !lifecycle.serves_published(plugin_id))
-        {
-            return None;
-        }
+        self.served_here(plugin_id).ok()?;
         declared(self.registry, plugin_id, namespace)
     }
 }
@@ -279,6 +322,7 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     plugin_id: &str,
     namespace: &str,
 ) -> Result<Json<PluginConfigResponse>, AppError> {
+    schemas.served_here(plugin_id)?;
     let stored_namespace = target.stored_namespace(plugin_id, namespace);
     let row = plugin_config::Entity::find_by_id((
         target.scope().as_str().to_string(),
@@ -298,6 +342,7 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
                 namespace,
                 config: shown.config,
                 config_withheld: shown.withheld,
+                unavailable: None,
                 enabled: r.enabled,
                 position: r.position,
                 updated_at: Some(r.updated_at),
@@ -639,8 +684,8 @@ async fn problems_of_contest<C: ConnectionTrait>(
 /// the check and the stored config. The write takes it in the order every
 /// config write and delete takes its rows ([`lock_reached`]).
 ///
-/// A replica that does not serve the plugin's published version writes
-/// none of its configs ([`SchemaSource::writable`]).
+/// A replica that does not serve the plugin writes none of its configs
+/// ([`SchemaSource::served_here`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     db: &C,
@@ -653,7 +698,7 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     config: serde_json::Value,
     settings: RowSettings,
 ) -> Result<(PluginConfigResponse, ConfigChange), AppError> {
-    schemas.writable(plugin_id)?;
+    schemas.served_here(plugin_id)?;
     let txn = db.begin().await?;
     lock_reached(&txn, target).await?;
     // A secret the client sends back as the ref a read showed it keeps what
@@ -743,6 +788,7 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
             namespace: strip_namespace_prefix(&row.namespace).to_string(),
             config: shown.config,
             config_withheld: shown.withheld,
+            unavailable: None,
             enabled: row.enabled,
             position: row.position,
             updated_at: Some(row.updated_at),
@@ -795,13 +841,18 @@ async fn lock_problems<C: ConnectionTrait>(db: &C, which: Condition) -> Result<(
     Ok(())
 }
 
-/// Deletes one stored config; [`AppError::NotFound`] when there is none.
+/// Deletes one stored config; [`AppError::NotFound`] when there is none. A
+/// replica that does not serve the plugin deletes none of its configs
+/// ([`SchemaSource::served_here`]): what a missing config falls back to is
+/// its plugin's to say, as much as what a stored one holds.
 pub(crate) async fn delete_config<C: ConnectionTrait + TransactionTrait>(
     db: &C,
+    schemas: SchemaSource<'_>,
     target: &ConfigTarget,
     plugin_id: &str,
     namespace: &str,
 ) -> Result<ConfigChange, AppError> {
+    schemas.served_here(plugin_id)?;
     let txn = db.begin().await?;
     lock_reached(&txn, target).await?;
     let stored_namespace = target.stored_namespace(plugin_id, namespace);
@@ -1286,12 +1337,13 @@ mod tests {
             "#,
         )
         .expect("manifest");
-        let entry = plugin_core::registry::PluginEntry::new(
+        let mut entry = plugin_core::registry::PluginEntry::new(
             "p".into(),
             std::path::PathBuf::from("/tmp/does-not-need-to-exist"),
             manifest,
         )
         .expect("entry");
+        entry.status = plugin_core::registry::PluginStatus::Loaded;
         std::sync::Arc::new(std::sync::RwLock::new(
             [("p".to_string(), entry)].into_iter().collect(),
         ))
@@ -1325,10 +1377,7 @@ mod tests {
         };
         let current = reporting(ReplicaPluginStatus::Loaded);
         let served = shown(
-            SchemaSource {
-                registry: &registry,
-                lifecycle: Some(&current),
-            },
+            SchemaSource::serving(&registry, &current),
             "p",
             "ns",
             config.clone(),
@@ -1347,10 +1396,7 @@ mod tests {
         ] {
             let behind = reporting(status);
             let served = shown(
-                SchemaSource {
-                    registry: &registry,
-                    lifecycle: Some(&behind),
-                },
+                SchemaSource::serving(&registry, &behind),
                 "p",
                 "ns",
                 config.clone(),
@@ -1385,7 +1431,7 @@ mod tests {
         let current = reporting(ReplicaPluginStatus::Loaded);
         assert!(
             SchemaSource::serving(&registry, &current)
-                .writable("p")
+                .served_here("p")
                 .is_ok()
         );
         for status in [
@@ -1395,14 +1441,14 @@ mod tests {
             let behind = reporting(status);
             assert!(
                 matches!(
-                    SchemaSource::serving(&registry, &behind).writable("p"),
-                    Err(AppError::PluginOutdatedHere(plugin)) if plugin == "p"
+                    SchemaSource::serving(&registry, &behind).served_here("p"),
+                    Err(NotServed::Outdated(plugin)) if plugin == "p"
                 ),
                 "{status:?}"
             );
             assert!(
                 SchemaSource::serving(&registry, &behind)
-                    .writable("other")
+                    .served_here("other")
                     .is_ok(),
                 "another plugin's configs are written as ever"
             );

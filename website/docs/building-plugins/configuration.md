@@ -127,11 +127,22 @@ marker (none for a required secret). An item the form adds, or one whose key
 you change, is new even if a saved item had that key: its secret is entered,
 and a blank one is sent as the marker, so no saved item's secret passes to it.
 
-A config whose namespace this server knows no schema for (its plugin is not
-installed here, or no longer declares the namespace), or whose plugin this
-server does not run at the version the fleet published, cannot say which of
-its fields are secret, so every read withholds it whole: `config` is `null`
-and `config_withheld` is `true`, and the cascade shows none of its scopes.
+A server acts on a plugin's configs only while it serves the plugin: loaded
+there at the version the fleet published. Every config route of a plugin it
+does not serve (read, write, delete, the plugin's own list, the config
+issues) answers one retryable 503 that names the plugin:
+
+- `PLUGIN_NOT_LOADED_HERE` while another live server serves it;
+- `PLUGIN_NOT_LOADED` while no live server loads it;
+- `PLUGIN_OUTDATED_HERE` while this server runs another version;
+- `PLUGIN_DISABLED` while an administrator has disabled it.
+
+A resource's config list still shows such a plugin's stored configs,
+withheld: `config` is `null`, `config_withheld` is `true`, and `unavailable`
+holds the code its routes answer, so the settings dialog says why in place
+of the plugin's form. A namespace its plugin no longer declares is withheld
+the same way, without a code, since no one here can say which of its fields
+are secret, and the cascade shows none of its scopes.
 
 A namespace may also declare a short `title`, which labels its tab in the
 settings form; the namespace's id labels it otherwise.

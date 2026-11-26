@@ -4074,6 +4074,15 @@ export interface components {
       plugin_id: string;
       /** Format: int32 */
       position: number;
+      /**
+       * @description Why `config` is withheld when this server does not serve the plugin
+       *     (it is disabled, loaded on no server, served by another server, or
+       *     loaded here at another version than the fleet published): the code
+       *     every route of the namespace answers here, whose text names the
+       *     plugin. `None` while the plugin is served here.
+       * @example PLUGIN_NOT_LOADED_HERE
+       */
+      unavailable?: string | null;
       /** Format: date-time */
       updated_at?: string | null;
     };

@@ -17,6 +17,13 @@ pub struct PluginConfigResponse {
     /// schema for the namespace (its plugin is not installed here, or no
     /// longer declares it), so it cannot tell which fields are secret.
     pub config_withheld: bool,
+    /// Why `config` is withheld when this server does not serve the plugin
+    /// (it is disabled, loaded on no server, served by another server, or
+    /// loaded here at another version than the fleet published): the code
+    /// every route of the namespace answers here, whose text names the
+    /// plugin. `None` while the plugin is served here.
+    #[schema(example = "PLUGIN_NOT_LOADED_HERE")]
+    pub unavailable: Option<String>,
     pub enabled: Option<bool>,
     pub position: i32,
     pub updated_at: Option<DateTime<Utc>>,
