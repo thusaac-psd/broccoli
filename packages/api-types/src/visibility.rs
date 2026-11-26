@@ -47,17 +47,6 @@ impl PluginOutage {
         }
     }
 
-    /// Whether some replica enforces what the plugin governs despite the
-    /// outage: another serves it (`NotLoadedHere`), or this one is loading
-    /// it (`Unavailable`). A disabled plugin, or one loaded nowhere, is
-    /// enforced by none.
-    pub fn enforced_elsewhere(&self) -> bool {
-        matches!(
-            self,
-            PluginOutage::NotLoadedHere { .. } | PluginOutage::Unavailable
-        )
-    }
-
     /// The plugin the outage names, if it names one.
     pub fn plugin_id(&self) -> Option<&str> {
         match self {
