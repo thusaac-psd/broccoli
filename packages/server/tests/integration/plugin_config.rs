@@ -367,6 +367,46 @@ mod secret_ref {
         );
     }
 
+    /// A secret stored without a ref (before refs were kept) gets one when
+    /// its plugin loads, so a save of the config as read keeps it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_secret_stored_without_a_ref_gets_one_its_save_keeps() {
+        use sea_orm::ConnectionTrait;
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("secret_ref_legacy", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        app.db
+            .execute_unprepared(&format!(
+                "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+                 VALUES ('problem', '{problem_id}', 'server-plugin:bundled', \
+                 '{{\"token\": \"legacy\"}}', 0, now())"
+            ))
+            .await
+            .unwrap();
+        let res = app
+            .post_with_token(
+                &routes::admin_plugin_reload("server-plugin"),
+                &json!({}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "bundled");
+        let read = app.get_with_token(&path, &admin).await;
+        let token = read.body["config"]["token"].clone();
+        assert!(
+            token["$secret"].as_str().is_some_and(|id| !id.is_empty()),
+            "the stored token reads as its ref: {}",
+            read.text
+        );
+        let (status, saved) = save(&app, &admin, &path, read.body["config"].clone()).await;
+        assert_eq!(status, 200, "{saved}");
+        assert_eq!(saved["config"]["token"], token, "kept");
+    }
+
     /// The print station case: an API client that deletes a station and adds
     /// one of the same name gets no old token back, whatever it sends.
     #[tokio::test]

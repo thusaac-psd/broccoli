@@ -352,7 +352,9 @@ async fn released_database(db: &DatabaseConnection) {
              heartbeat_at) VALUES \
              ('server-a', '{\"icpc\": \"1.0.0\"}', '[\"icpc\"]', NOW(), NOW()); \
          INSERT INTO plugin_config (scope, ref_id, namespace, config, enabled) VALUES \
-             ('problem', '1', 'icpc', '{}', TRUE); \
+             ('problem', '1', 'icpc', '{}', TRUE), \
+             ('plugin', 'print', 'print', \
+                 '{\"stations\": [{\"name\": \"desk\", \"token\": \"desk-token\"}]}', NULL); \
          INSERT INTO problem (id, title, content, time_limit, memory_limit, problem_type, \
              default_contest_type, checker_format, created_at, updated_at) VALUES \
              (1, 'p', 'c', 1000, 1024, 'batch', 'icpc', 'exact', NOW(), NOW()); \
@@ -457,6 +459,11 @@ async fn a_database_the_released_build_ran_upgrades_to_this_build() {
         code_run,
     );
 
+    // A secret the released build stored has no ref until its plugin, which
+    // says the field is secret, loads; then a save of the config as read
+    // keeps it.
+    secret_stored_before_refs_is_kept_by_a_save_as_read(&db_url).await;
+
     // The judging-inputs triggers run on an upgraded row.
     let version = || async {
         entity::problem::Entity::find_by_id(1)
@@ -475,6 +482,53 @@ async fn a_database_the_released_build_ran_upgrades_to_this_build() {
         "a change to an upgraded problem counts"
     );
     boot.release().await.expect("release");
+}
+
+async fn secret_stored_before_refs_is_kept_by_a_save_as_read(db_url: &str) {
+    use crate::entity::plugin_config;
+    use crate::services::plugin_config::{mint_secret_ref, ref_stored_secrets, secret_refs};
+    use plugin_core::manifest::StoredSecrets;
+    use sea_orm::EntityTrait;
+
+    let db = connect(db_url).await;
+    let row = || async {
+        plugin_config::Entity::find_by_id(("plugin".into(), "print".into(), "print".into()))
+            .one(db.as_sea_orm())
+            .await
+            .expect("read")
+            .expect("kept")
+    };
+    assert_eq!(row().await.secret_refs, serde_json::json!([]));
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/print");
+    let mut entry = plugin_core::registry::PluginEntry::from_dir(&dir).expect("print manifest");
+    entry.status = plugin_core::registry::PluginStatus::Loaded;
+    let ns = entry.manifest.config["print"].clone();
+    let registry: plugin_core::registry::PluginRegistry = std::sync::Arc::new(
+        std::sync::RwLock::new([("print".to_string(), entry)].into_iter().collect()),
+    );
+    ref_stored_secrets(&db, &registry, None).await;
+
+    let stored = row().await;
+    let refs = secret_refs(&stored.secret_refs);
+    assert_eq!(refs.len(), 1, "the stored token has its ref");
+    let mut read = stored.config.clone();
+    ns.show_secrets(&mut read, &refs);
+    assert_eq!(read["stations"][0]["token"]["$secret"], refs[0].id.as_str());
+    let kept = ns.keep_secrets(
+        &mut read,
+        StoredSecrets {
+            config: Some(&stored.config),
+            refs: &refs,
+        },
+        &mut mint_secret_ref,
+    );
+    assert_eq!(
+        kept,
+        Ok(refs),
+        "a save of the config as read keeps the token"
+    );
+    assert_eq!(read, stored.config);
 }
 
 /// Each migration of this release says in its docs whether it is additive

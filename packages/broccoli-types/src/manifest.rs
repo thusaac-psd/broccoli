@@ -981,6 +981,46 @@ impl ConfigNamespace {
         );
     }
 
+    /// The refs of `value` with one for each secret it holds a value for:
+    /// a stored secret's own ref in `refs`, else one from `mint`; `None`
+    /// when every set secret has one already. A set secret always has a
+    /// ref, so a read shows one a save sends back; a value stored before its
+    /// field was secret, or before refs were kept, gets its ref here.
+    pub fn ref_every_secret(
+        &self,
+        value: &serde_json::Value,
+        refs: &[SecretRef],
+        mint: &mut dyn FnMut() -> String,
+    ) -> Option<Vec<SecretRef>> {
+        let mut value = value.clone();
+        let mut complete = Vec::new();
+        let mut minted = false;
+        each_secret(
+            &self.properties,
+            &[],
+            &mut value,
+            "",
+            &mut Vec::new(),
+            &mut |_, identity, fields, key, _| {
+                if fields.get(key).is_none_or(unset) {
+                    return;
+                }
+                let id = match ref_at(refs, identity) {
+                    Some(id) if !id.is_empty() => id.to_string(),
+                    _ => {
+                        minted = true;
+                        mint()
+                    }
+                };
+                complete.push(SecretRef {
+                    identity: identity.to_vec(),
+                    id,
+                });
+            },
+        );
+        minted.then_some(complete)
+    }
+
     /// Applies the secret rule to each secret field of a value a client
     /// writes, against what is `stored`, and returns the refs of the
     /// secrets the value holds once written, or every field refused. An
@@ -1356,6 +1396,27 @@ mod tests {
         write: serde_json::Value,
     ) -> Result<(serde_json::Value, Vec<SecretRef>), Vec<SecretRefusal>> {
         write_to(&stations(), write, Some(&stored_pair()))
+    }
+
+    #[test]
+    fn every_set_secret_gets_a_ref_and_one_that_has_its_own_keeps_it() {
+        let (config, _) = stored_pair();
+        let mut minted = 0;
+        let mut mint = || {
+            minted += 1;
+            format!("new{minted}")
+        };
+        assert_eq!(
+            stations().ref_every_secret(&config, &[secret_ref("beta", "rb")], &mut mint),
+            Some(vec![secret_ref("alpha", "new1"), secret_ref("beta", "rb")]),
+            "a secret stored without a ref gets one"
+        );
+        let (config, refs) = stored_pair();
+        assert_eq!(
+            stations().ref_every_secret(&config, &refs, &mut mint),
+            None,
+            "nothing to mint"
+        );
     }
 
     #[test]

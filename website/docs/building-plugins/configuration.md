@@ -96,7 +96,9 @@ The JSON schema marks the field `writeOnly` and the array `x-key`. No read
 route sends a secret's value. The admin config routes answer a set secret as
 its ref, `{"$secret": "<ref>"}` (the API schema's `KeptSecret`): an opaque id
 the server mints each time it stores a new value, and keeps while the value
-stays. The cascade answers the field as `null`.
+stays. Every set secret has one: a value stored before its field was secret
+gets its ref when the plugin that marks it secret loads. The cascade answers
+the field as `null`.
 
 A write keeps a stored secret only where it sends that ref back, on the item
 the read showed it on (the stored item whose key field has the same value,

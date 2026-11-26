@@ -271,6 +271,114 @@ pub(crate) fn secret_refs(stored: &serde_json::Value) -> Vec<SecretRef> {
     serde_json::from_value(stored.clone()).unwrap_or_default()
 }
 
+/// Gives every secret the stored configs of the plugins this replica has
+/// loaded hold a ref, by their schemas ([`ConfigNamespace::ref_every_secret`]):
+/// those of `only`, or of every loaded plugin. A set secret always has a
+/// ref, so a read shows one that a save sends back to keep it; a value
+/// stored before refs were kept, or before its field was secret, gets its
+/// ref when the plugin that says it is secret loads. Each row is read and
+/// written under its lock, so replicas loading at once mint one ref each.
+pub(crate) async fn ref_stored_secrets(
+    db: &DatabaseConnection,
+    registry: &PluginRegistry,
+    only: Option<&[&str]>,
+) {
+    let namespaces: Vec<(String, String, ConfigNamespace)> = match registry.read() {
+        Ok(registry) => registry
+            .iter()
+            .filter(|(id, entry)| {
+                entry.status == plugin_core::registry::PluginStatus::Loaded
+                    && only.is_none_or(|only| only.contains(&id.as_str()))
+            })
+            .flat_map(|(id, entry)| {
+                entry
+                    .manifest
+                    .config
+                    .iter()
+                    .filter(|(_, ns)| ns.properties.values().any(|p| p.holds_secret()))
+                    .map(|(name, ns)| (id.clone(), name.clone(), ns.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+        Err(_) => return,
+    };
+    for (plugin_id, namespace, ns) in namespaces {
+        if let Err(error) = ref_secrets_of(db, &plugin_id, &namespace, &ns).await {
+            tracing::warn!(
+                plugin_id,
+                namespace,
+                ?error,
+                "could not give stored secrets their refs"
+            );
+        }
+    }
+}
+
+/// [`ref_stored_secrets`] for one namespace of `plugin_id`, at every scope.
+async fn ref_secrets_of(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    namespace: &str,
+    ns: &ConfigNamespace,
+) -> Result<(), AppError> {
+    let keys: Vec<(String, String, String)> = plugin_config::Entity::find()
+        .select_only()
+        .columns([
+            plugin_config::Column::Scope,
+            plugin_config::Column::RefId,
+            plugin_config::Column::Namespace,
+        ])
+        .filter(
+            Condition::any()
+                .add(
+                    Condition::all()
+                        .add(plugin_config::Column::Scope.eq(ConfigScope::Plugin.as_str()))
+                        .add(plugin_config::Column::RefId.eq(plugin_id))
+                        .add(plugin_config::Column::Namespace.eq(namespace)),
+                )
+                .add(
+                    Condition::all()
+                        .add(plugin_config::Column::Scope.ne(ConfigScope::Plugin.as_str()))
+                        .add(
+                            plugin_config::Column::Namespace.eq(format!("{plugin_id}:{namespace}")),
+                        ),
+                ),
+        )
+        .into_tuple()
+        .all(db)
+        .await?;
+    for key in keys {
+        let txn = db.begin().await?;
+        let Some(row) = plugin_config::Entity::find_by_id(key.clone())
+            .lock(LockType::Update)
+            .one(&txn)
+            .await?
+        else {
+            continue;
+        };
+        if let Some(refs) = ns.ref_every_secret(
+            &row.config,
+            &secret_refs(&row.secret_refs),
+            &mut mint_secret_ref,
+        ) {
+            plugin_config::Entity::update_many()
+                .col_expr(
+                    plugin_config::Column::SecretRefs,
+                    sea_orm::sea_query::Expr::value(
+                        serde_json::to_value(&refs).expect("refs serialize"),
+                    ),
+                )
+                .filter(plugin_config::Column::Scope.eq(&key.0))
+                .filter(plugin_config::Column::RefId.eq(&key.1))
+                .filter(plugin_config::Column::Namespace.eq(&key.2))
+                .exec(&txn)
+                .await?;
+        }
+        txn.commit().await?;
+    }
+    Ok(())
+}
+
 /// A new secret's ref: opaque, and never the same twice.
 pub(crate) fn mint_secret_ref() -> String {
     uuid::Uuid::new_v4().simple().to_string()

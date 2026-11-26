@@ -1034,6 +1034,12 @@ pub async fn boot(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailur
         reconcile_locked(state, applied).await
     })
     .await?;
+    crate::services::plugin_config::ref_stored_secrets(
+        &state.db,
+        state.plugins.get_registry(),
+        None,
+    )
+    .await;
     crate::services::config_issues::recheck_every_problem(
         &state.db,
         &crate::services::config_issues::ConfigChecker::of(state),
@@ -2288,10 +2294,17 @@ async fn published_source(state: &AppState, id: &PluginId) -> Result<PluginSourc
     }
 }
 
-/// A change to these plugins can change what their config checks find, so it
+/// A change to these plugins can change which config fields are secret and
+/// what their config checks find, so it gives their stored secrets refs and
 /// rechecks the problems those checks reach (see
 /// [`crate::services::config_issues`]).
 async fn recheck_config_issues(state: &AppState, plugin_ids: &[&str]) {
+    crate::services::plugin_config::ref_stored_secrets(
+        &state.db,
+        state.plugins.get_registry(),
+        Some(plugin_ids),
+    )
+    .await;
     crate::services::config_issues::recheck_problems_of_plugins(
         &state.db,
         &crate::services::config_issues::ConfigChecker::of(state),
