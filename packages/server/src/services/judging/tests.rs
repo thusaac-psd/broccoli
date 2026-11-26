@@ -461,7 +461,6 @@ async fn an_immediate_rejudge_queues_both_rows_with_no_owner() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 0 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -496,7 +495,6 @@ async fn lease_refresh_covers_a_current_judgement_beside_a_newer_deferred_one() 
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -538,7 +536,6 @@ async fn lease_refresh_covers_only_live_dispatches() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -571,7 +568,6 @@ async fn a_lapsed_lease_requeues_under_a_new_epoch_and_spends_a_retry() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -625,7 +621,6 @@ async fn one_reclaim_takes_over_every_lapsed_unit_whatever_the_batch_size() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         3,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -647,11 +642,61 @@ async fn a_live_lease_is_left_alone() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
     assert_eq!(reclaimed, Reclaimed::default());
+}
+
+/// Work whose owner died is reclaimed by any live replica once its lease
+/// lapses, whether or not that replica can run it: here the dead owner was
+/// the only replica with the unit's evaluator loaded, and a replica with
+/// nothing loaded takes the unit back to `Queued`. Its provider is loaded on
+/// no live replica, so the unit is parked, not abandoned: no dispatch retry
+/// is spent, and nothing claims it until a replica loads its provider.
+#[tokio::test]
+async fn work_whose_dead_owner_was_its_only_provider_is_reclaimed_and_parked() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, _) = new_submission(&db).await;
+    evaluator(&db, true).await;
+    let claimed = claim_one(&db, "dead").await;
+    exec(
+        &db,
+        "UPDATE submission_judgement SET lease_heartbeat_at = NOW() - INTERVAL '2 minutes'",
+    )
+    .await;
+    exec(
+        &db,
+        "UPDATE plugin_replica SET heartbeat_at = NOW() - INTERVAL '2 minutes' \
+          WHERE server_id = 'dead'",
+    )
+    .await;
+    live(&db, "srv", NO_TYPES).await;
+
+    let reclaimed = reclaim_abandoned(
+        &db,
+        Unit::Judgement,
+        Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
+        RetryBudget::new(5),
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reclaimed.requeued, 1, "{reclaimed:?}");
+    let j = judgement(&db, claimed.judgement.id).await;
+    assert_eq!(j.status, SubmissionStatus::Queued);
+    assert_eq!(j.owner_server_id, None);
+    assert_eq!(j.dispatch_retries, 0, "a parked unit spends no retry");
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::Queued);
+
+    let nothing = claim_judgements(&db, "srv", TEN, NO_TYPES).await.unwrap();
+    assert_eq!(nothing.units.len(), 0, "parked while loaded nowhere");
+    let with_evaluator = every_enabled(&db).await;
+    peer(&db, &with_evaluator).await;
+    let resumed = claim_judgements(&db, "peer", TEN, &with_evaluator)
+        .await
+        .unwrap();
+    assert_eq!(resumed.units.len(), 1, "it resumes once a replica loads it");
 }
 
 #[tokio::test]
@@ -672,7 +717,6 @@ async fn a_spent_dispatch_budget_finalizes_and_dead_letters_once_per_submission(
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(2),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -720,16 +764,9 @@ async fn a_dispatch_past_the_in_flight_cap_is_stuck_even_with_a_fresh_lease() {
         max_inflight_secs: cap,
     };
 
-    let ignored = reclaim_abandoned(
-        &db,
-        Unit::Judgement,
-        stuck(None),
-        RetryBudget::new(5),
-        10,
-        NO_TYPES,
-    )
-    .await
-    .unwrap();
+    let ignored = reclaim_abandoned(&db, Unit::Judgement, stuck(None), RetryBudget::new(5), 10)
+        .await
+        .unwrap();
     assert_eq!(ignored, Reclaimed::default(), "no cap, fresh heartbeat");
 
     let reclaimed = reclaim_abandoned(
@@ -738,7 +775,6 @@ async fn a_dispatch_past_the_in_flight_cap_is_stuck_even_with_a_fresh_lease() {
         stuck(Some(3600)),
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -1015,7 +1051,6 @@ async fn a_code_run_follows_the_same_claim_and_requeue_rules() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -1062,7 +1097,6 @@ async fn steal(db: &DatabaseConnection) -> Reclaimed {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(0),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap()
@@ -1531,22 +1565,53 @@ async fn work_handed_back_for_an_outage_waits_before_it_is_claimed_again() {
     assert_eq!(claimable(&db).await, 1, "claimed once it passed");
 }
 
-/// An attempt that found no plugin SQL connection free (contention with the
-/// work beside it) is handed back spending nothing, but only
-/// `CONTENTION_HANDBACKS` times per unit, counted on its row: the next one
-/// is a failure judging the submission, so contention that never clears
-/// cannot hand a unit back forever.
+/// An attempt the platform loses in a way a unit's own plugins can cause is
+/// handed back spending nothing, but only up to its cap per unit, counted on
+/// its row: no plugin SQL connection free (contention with the work beside
+/// it, `CONTENTION_HANDBACKS`), or its plugin SQL connection lost while the
+/// host database answers (a restart, a failover, a reaper, or a plugin
+/// ending its own backend by a route the guard misses, `LOSS_HANDBACKS`).
+/// The next one is a failure judging the submission, so neither can hand a
+/// unit back forever, and each cap counts only its own cause.
 #[tokio::test]
-async fn a_contended_attempt_is_handed_back_only_up_to_its_cap() {
+async fn a_capped_attempt_is_handed_back_only_up_to_its_cap() {
+    use super::fault::HandBackCap;
     let (_pg, db) = crate::test_support::postgres().await;
-    new_submission(&db).await;
-    let contended = || {
-        DispatchFailure::from(super::fault::Recorded {
-            fault: DispatchFault::SqlContended,
-            message: "no plugin SQL connection was free".into(),
-        })
-    };
-    for handed_back in 1..=super::fault::CONTENTION_HANDBACKS {
+    for (cap, code) in [
+        (HandBackCap::Contention, HostCode::DatabaseBusy),
+        (HandBackCap::ConnectionLost, HostCode::DatabaseUnavailable),
+    ] {
+        new_submission(&db).await;
+        let failure = || {
+            DispatchFailure::from(super::fault::Recorded {
+                fault: cap.fault(),
+                message: "the plugin's SQL did not run".into(),
+            })
+        };
+        let counted = |j: &crate::entity::submission_judgement::Model| match cap {
+            HandBackCap::Contention => (j.contended_handbacks, j.lost_handbacks),
+            HandBackCap::ConnectionLost => (j.lost_handbacks, j.contended_handbacks),
+        };
+        for handed_back in 1..=cap.limit() {
+            let claimed = claim_one(&db, "srv").await;
+            assert_eq!(
+                fail_dispatch(
+                    &db,
+                    Unit::Judgement,
+                    claimed.judgement.id,
+                    claimed.judgement.judge_epoch,
+                    &failure(),
+                )
+                .await
+                .unwrap(),
+                DispatchFailed::HandedBack,
+                "{cap:?} hand-back {handed_back}"
+            );
+            let j = judgement(&db, claimed.judgement.id).await;
+            assert_eq!(j.status, SubmissionStatus::Queued);
+            assert_eq!(counted(&j), (handed_back, 0), "{cap:?}");
+            exec(&db, "UPDATE submission_judgement SET queued_at = NOW()").await;
+        }
         let claimed = claim_one(&db, "srv").await;
         assert_eq!(
             fail_dispatch(
@@ -1554,39 +1619,18 @@ async fn a_contended_attempt_is_handed_back_only_up_to_its_cap() {
                 Unit::Judgement,
                 claimed.judgement.id,
                 claimed.judgement.judge_epoch,
-                &contended(),
+                &failure(),
             )
             .await
             .unwrap(),
-            DispatchFailed::HandedBack,
-            "hand-back {handed_back}"
+            DispatchFailed::SystemError,
+            "{cap:?}: past the cap the failure is the submission's"
         );
         let j = judgement(&db, claimed.judgement.id).await;
-        assert_eq!(j.status, SubmissionStatus::Queued);
-        assert_eq!(j.contended_handbacks, handed_back);
-        exec(&db, "UPDATE submission_judgement SET queued_at = NOW()").await;
+        assert_eq!(j.status, SubmissionStatus::SystemError);
+        assert_eq!(j.error_code.as_deref(), Some(code.as_str()), "{cap:?}");
+        assert!(!j.error_stands, "within its retry budget");
     }
-    let claimed = claim_one(&db, "srv").await;
-    assert_eq!(
-        fail_dispatch(
-            &db,
-            Unit::Judgement,
-            claimed.judgement.id,
-            claimed.judgement.judge_epoch,
-            &contended(),
-        )
-        .await
-        .unwrap(),
-        DispatchFailed::SystemError,
-        "past the cap the failure is the submission's"
-    );
-    let j = judgement(&db, claimed.judgement.id).await;
-    assert_eq!(j.status, SubmissionStatus::SystemError);
-    assert_eq!(
-        j.error_code.as_deref(),
-        Some(HostCode::DatabaseBusy.as_str())
-    );
-    assert!(!j.error_stands, "within its retry budget");
 }
 
 /// An attempt the platform lost (the queue was unreachable or lost an

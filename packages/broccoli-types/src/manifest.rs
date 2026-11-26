@@ -903,8 +903,10 @@ pub fn keep_withheld(
 
 /// The language a checker source of `filenames` (in stored order) compiles
 /// in, by `languages` (language to the extensions of a primary file, without
-/// the dot): the language of the first file whose extension, compared
-/// case-insensitively, one of them lists; `None` when no file's does. The one
+/// the dot): the language of the first file whose extension (the text after
+/// its last `.`) equals one of them lists, ASCII letters compared
+/// case-insensitively; when several languages list it, the first of them in
+/// `languages`' order, bytewise by name. `None` when no file's does. The one
 /// rule for a problem's checker language: the host derives it in SQL
 /// (`providers::checker_language_sql`) and the checker plugin compiles by it,
 /// both pinned to this function.

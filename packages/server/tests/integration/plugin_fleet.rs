@@ -1088,10 +1088,12 @@ async fn a_dispatch_refused_at_shutdown_leaves_the_submission_for_a_peer() {
     assert_eq!(released.judgements, 1, "requeued for a peer to claim");
 }
 
-/// The stuck-job detector leaves work to a live replica that can judge it,
-/// like every other scan that hands out judging work.
+/// Any live replica's stuck-job detector recovers stuck work, whatever it has
+/// loaded: taking work back to the queue runs nothing, and the claim, not the
+/// recovery, leaves it to a replica that can judge it. Here B, which has no
+/// provider of the work's contest type, recovers it.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_stuck_detector_leaves_work_to_a_replica_that_can_judge_it() {
+async fn the_stuck_detector_recovers_work_any_replica_can_run() {
     use common::SubmissionStatus;
     use sea_orm::Set;
     use server::entity::submission;
@@ -1146,15 +1148,9 @@ async fn the_stuck_detector_leaves_work_to_a_replica_that_can_judge_it() {
         .await
         .unwrap();
     let after_b = reload().await;
-    assert_eq!(after_b.judge_epoch, 0, "B must leave it: {after_b:?}");
-    assert_eq!(after_b.owner_server_id.as_deref(), Some("dead-server"));
-
-    server::dlq::detect_stuck_jobs_once(&a.state, &dlq)
-        .await
-        .unwrap();
-    let after_a = reload().await;
-    assert_ne!(after_a.judge_epoch, 0, "A requeues it: {after_a:?}");
-    assert_eq!(after_a.status, SubmissionStatus::Queued);
+    assert_ne!(after_b.judge_epoch, 0, "B recovers it: {after_b:?}");
+    assert_eq!(after_b.status, SubmissionStatus::Queued);
+    assert_eq!(after_b.owner_server_id, None);
 }
 
 /// Once shutdown has retired this replica's row, nothing may write it back

@@ -219,11 +219,13 @@ binaries warn about every key they do not read.
   fails the call as the database's and, under a dispatch, hands the attempt
   back; any other error is the statement's. Plugin SQL that cannot run names why
   by one mapping (`host_funcs::sql::Unanswered`): a lost database answers
-  `DATABASE_UNAVAILABLE` (a hand-back, queued `OUTAGE_HANDBACK_DELAY` ahead, and
-  only once one probe on the host pool confirms it, `PluginSqlPools::confirmed`:
-  a plugin connection cut while the host answers is the plugin's own failure,
-  and the SQL guard refuses backend signalling), a plugin SQL pool or permit
-  with nothing free for a call that held none `DATABASE_BUSY` (contention:
+  `DATABASE_UNAVAILABLE` (a hand-back, queued `OUTAGE_HANDBACK_DELAY` ahead; one
+  probe on the host pool, `PluginSqlPools::confirmed`, tells a lost database
+  from a plugin connection lost while the host answers, a restart, failover or
+  reaper, which hands back too but only `LOSS_HANDBACKS` times per unit, counted
+  on its row, since dynamic SQL can end its own backend past the guard that
+  refuses backend signalling), a plugin SQL pool or permit with nothing free for
+  a call that held none `DATABASE_BUSY` (contention:
   `DispatchFault::SqlContended` hands back only `CONTENTION_HANDBACKS` times per
   unit, counted on its row, then spends the submission's budget), a wait for a
   connection while the call holds one of its own the plugin's own error, a
@@ -322,8 +324,11 @@ binaries warn about every key they do not read.
   paths refuse it (`accepting_handler`), and it resumes when a provider is
   enabled. A replica takes a unit only when it has every key's fleet-wide
   provider loaded (`providers::runs_here`, local registrations from
-  `Loaded::here`). A provider enabled but loaded on no live replica parks the
-  work the same way (`ClosedReason::NotLoaded`; the submit paths answer
+  `Loaded::here`); taking lapsed or stuck work back to the queue
+  (`reclaim_abandoned`) reads no local loads, so any live replica recovers a
+  dead owner's work, and work no live replica can run waits parked, spending no
+  retry. A provider enabled but loaded on no live replica parks the work the
+  same way (`ClosedReason::NotLoaded`; the submit paths answer
   `PLUGIN_NOT_LOADED`), never another provider; only a key no enabled plugin
   provides is taken without its plugin, to stand as `NO_PROVIDER`. A plugin
   missing at dispatch while an enabled plugin provides the key hands the attempt

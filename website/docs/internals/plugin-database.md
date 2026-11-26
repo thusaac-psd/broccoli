@@ -228,7 +228,10 @@ A plugin's SQL runs within the deadline of the call that runs it
   through `host_funcs::host_db` (`failed`, `settle`, `failed_service`, and
   the outage mapping `fail_call` the SQL path shares): a route answers the
   database's 503, a timer delivery is handed back with its attempt refunded
-  and a dispatch hands its attempt back. A host function keeps the error it
+  (tried again every `OUTAGE_RETRY`, 5 s, for a lost database, and backing
+  off, doubling to `BUSY_RETRY_CAP`, 60 s, for contention, its own SQL
+  permits included; neither ever drops a timer) and a dispatch hands its
+  attempt back. A host function keeps the error it
   meets as the source of the one it returns, never as text, and
   `host_function` applies the rule to every error a host function returns
   (`host_db::settle_call`), so an outage anywhere in its chain counts;

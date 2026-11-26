@@ -1022,25 +1022,30 @@ impl std::ops::AddAssign for Reclaimed {
     }
 }
 
-/// Takes over every in-flight unit of `unit` that `abandoned` selects and
-/// this replica can judge, `batch` rows per transaction: each with dispatch
-/// retries left is requeued (spending one), each without is finalized as
-/// `SystemError` and dead-lettered. Batches repeat until one comes back
-/// short, so a dead server's whole in-flight set is recovered in one scan
-/// however large it is. Every batch takes its rows out of flight, so the
-/// loop ends.
+/// Takes over every in-flight unit of `unit` that `abandoned` selects,
+/// `batch` rows per transaction, whatever this replica has loaded: taking a
+/// unit back to the queue runs nothing, and the claim, not the reclaim,
+/// leaves work to a replica that runs it (`Unit::runs_here`). So work whose
+/// owner died is recovered even when no live replica can run it. A unit that
+/// is not runnable now (its provider disabled, or loaded on no live replica,
+/// as when the dead owner was its only one) is handed back spending nothing
+/// and waits parked; one that is runnable with dispatch retries left is
+/// requeued spending one, and one without is finalized as `SystemError` and
+/// dead-lettered. Every replica decides a unit alike, since all of it reads
+/// the fleet-wide tables. Batches repeat until one comes back short, so a
+/// dead server's whole in-flight set is recovered in one scan however large
+/// it is. Every batch takes its rows out of flight, so the loop ends.
 pub(crate) async fn reclaim_abandoned(
     db: &DatabaseConnection,
     unit: Unit,
     abandoned: Abandoned,
     budget: RetryBudget,
     batch: u32,
-    local: &Loaded,
 ) -> Result<Reclaimed, DbErr> {
     let batch = batch.max(1);
     let mut total = Reclaimed::default();
     loop {
-        let (taken, reclaimed) = reclaim_batch(db, unit, abandoned, budget, batch, local).await?;
+        let (taken, reclaimed) = reclaim_batch(db, unit, abandoned, budget, batch).await?;
         total += reclaimed;
         if taken < batch as usize {
             return Ok(total);
@@ -1055,16 +1060,13 @@ async fn reclaim_batch(
     abandoned: Abandoned,
     budget: RetryBudget,
     limit: u32,
-    local: &Loaded,
 ) -> Result<(usize, Reclaimed), DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let predicate = abandoned.predicate(&mut b);
-    let local = b.bind(serde_json::to_value(local).expect("loaded keys serialize"));
     let filter = format!(
-        "u.status IN {in_flight} AND {predicate} AND {handled}",
+        "u.status IN {in_flight} AND {predicate}",
         in_flight = StatusPhase::InFlight.sql_list(),
-        handled = unit.runs_here(&local),
     );
     let picked = pick(&txn, unit, b, filter, Some(limit)).await?;
     let taken = picked.len();
@@ -1333,11 +1335,11 @@ pub(crate) async fn fail_dispatch(
         return hand_back(db, unit, id, judge_epoch, None, outage).await;
     }
     let past_cap;
-    let failure = if failure.class == SystemErrorClass::Contended {
-        if counted_contention(db, unit, id, judge_epoch).await? {
+    let failure = if let SystemErrorClass::Capped(cap) = failure.class {
+        if counted_hand_back(db, unit, id, judge_epoch, cap).await? {
             return hand_back(db, unit, id, judge_epoch, None, outage).await;
         }
-        // The unit used its contention hand-backs: the failure is the
+        // The unit used its hand-backs for this cause: the failure is the
         // submission's to spend a retry on.
         past_cap = DispatchFailure {
             class: SystemErrorClass::Judging,
@@ -1403,28 +1405,26 @@ pub(crate) async fn fail_dispatch(
 /// the in-flight unit. With `unless_open`, the failure is the disable's only
 /// while the unit's type is still parked: if a provider was enabled since, it
 /// is finalized with that failure instead.
-/// Counts one contention hand-back on unit `id` at `judge_epoch`, if it has
-/// any left (`super::fault::CONTENTION_HANDBACKS`): whether it was counted,
-/// so the attempt is handed back.
-async fn counted_contention(
+/// Counts one hand-back for `cap` on unit `id` at `judge_epoch`, if it has
+/// any left (`HandBackCap::limit`): whether it was counted, so the attempt
+/// is handed back.
+async fn counted_hand_back(
     db: &DatabaseConnection,
     unit: Unit,
     id: i32,
     judge_epoch: i32,
+    cap: super::fault::HandBackCap,
 ) -> Result<bool, DbErr> {
     Ok(db
         .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
-                "UPDATE {table} SET contended_handbacks = contended_handbacks + 1 \
-                  WHERE id = $1 AND judge_epoch = $2 AND contended_handbacks < $3",
+                "UPDATE {table} SET {count} = {count} + 1 \
+                  WHERE id = $1 AND judge_epoch = $2 AND {count} < $3",
                 table = unit.table(),
+                count = cap.column(),
             ),
-            [
-                id.into(),
-                judge_epoch.into(),
-                super::fault::CONTENTION_HANDBACKS.into(),
-            ],
+            [id.into(), judge_epoch.into(), cap.limit().into()],
         ))
         .await?
         .rows_affected()

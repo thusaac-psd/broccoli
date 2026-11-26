@@ -45,7 +45,14 @@ recovery is a requeue:
 One lease-steal or stuck-job scan takes over everything it selects: it works
 in transactions of `steal_batch_size` rows (256 for the detector) and repeats
 them until one comes back short, so a dead server's whole in-flight set is
-requeued within one scan interval however large it is.
+requeued within one scan interval however large it is. Any live replica takes
+lapsed work back, whatever it has loaded: requeuing runs nothing, and the
+claim leaves the work to a replica that runs it. Work whose dead owner was the
+only replica with its provider loaded is therefore recovered too: its
+provider is loaded on no live replica, so it is handed back spending no
+dispatch retry and waits parked (`parked_by`, `reason: not_loaded`) until a
+replica loads it. Work that is runnable elsewhere spends one dispatch retry,
+so a unit that keeps killing the servers that take it runs out of them.
 
 Every lease age is compared on the database clock: claims and refreshes stamp
 `NOW()`, and the scans compare against `NOW()`.
@@ -115,8 +122,8 @@ where a disabled provider answers `PLUGIN_DISABLED`; both name the plugin in
 replica that loads the provider is live (`providers::runnable`,
 `PluginLifecycle::closed_by`, which reads the live replicas' loads as of the
 last reconcile). An administrator who wants the next provider to take the
-key disables the first. The claim, the system-error retry, the steal and
-the stuck detector take a unit only when this replica has every key's
+key disables the first. The claim and the system-error retry take a unit
+only when this replica has every key's
 fleet-wide provider loaded (`Loaded::here`, read from its registries, so the
 check costs no round trip; `providers::runs_here`). Only a key no enabled
 plugin provides at all is taken by a replica without it, to fail visibly
@@ -367,11 +374,17 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement the
 dispatch or its plugins ran that the database could not serve
 (`DATABASE_UNAVAILABLE`): the database lost. A plugin's connection that is
-lost is confirmed with one probe on the host's own pool: if the host database
-answers, the plugin's connection was cut under it, which is the plugin's own
-failure, and the plugin SQL guard refuses the statements that would cut one
-(`pg_terminate_backend`, `pg_cancel_backend`, `pg_signal_backend`). One rule
-records it,
+lost is checked with one probe on the host's own pool. If the host database
+is gone too, it is an outage, handed back however often it happens. If the
+host database answers, only the plugin's connection was lost (a fast restart,
+a failover or a connection reaper ended its backend): the platform's too, so
+it is handed back (`DispatchFault::ConnectionLost`), but only
+`LOSS_HANDBACKS` (5) times per unit, counted on the unit's row
+(`lost_handbacks`), and after that it is a failure judging the submission,
+within its retry budget. The cap bounds the one route a plugin has to end its
+own backend: the plugin SQL guard refuses the statements that would
+(`pg_terminate_backend`, `pg_cancel_backend`, `pg_signal_backend`), but
+dynamic SQL escapes a text guard. One rule records it,
 `host_funcs::host_db`: plugin SQL where every unavailable statement ends
 (`host_funcs::sql::unavailable`, through `host_db::fail_under`), the host's
 own SQL in a host function through `host_db::failed`, and the dispatch's own

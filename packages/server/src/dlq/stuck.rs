@@ -59,19 +59,11 @@ pub async fn detect_once(state: &AppState, config: &DlqConfig) -> anyhow::Result
     };
     let budget = RetryBudget::new(state.config.server.max_dispatch_retries);
     // Recovery requeues for the claim fiber, which leaves work to a replica
-    // that can judge it; selecting the same way keeps a replica from burning
-    // retries on work it cannot judge.
-    let local = crate::providers::Loaded::here(&state.registries).await;
+    // that can judge it, so any replica recovers any stuck work.
     for unit in [Unit::Judgement, Unit::CodeRun] {
-        let reclaimed = judging::reclaim_abandoned(
-            &state.db,
-            unit,
-            abandoned,
-            budget,
-            DETECT_BATCH_SIZE,
-            &local,
-        )
-        .await?;
+        let reclaimed =
+            judging::reclaim_abandoned(&state.db, unit, abandoned, budget, DETECT_BATCH_SIZE)
+                .await?;
         if reclaimed.requeued > 0 || reclaimed.exhausted > 0 {
             warn!(
                 ?unit,
