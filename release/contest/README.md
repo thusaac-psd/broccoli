@@ -175,14 +175,21 @@ to another server.
   sends a ref the item does not hold (or one read before the secret was set
   again), is refused with `secret_not_stored`: re-enter the secret, or clear it
   on purpose. A station's token is required, so it can never be cleared or left
-  empty (`secret_required`): enter one.
+  empty (`secret_required`): enter one. Every new value typed for a secret gets
+  a new ref, even the value already stored, and a secret stored before this
+  release gets its ref when its plugin loads, so saving unchanged keeps it.
 - **A secret belongs to its item by key** (a print station by its name). A
   renamed station, or one deleted and added again under the same name, is a new
   station: enter its token again. Two stations cannot share a name.
-- **Settings save on an up-to-date server.** A server not yet running a plugin's
-  published version refuses saves of that plugin's settings with
-  `PLUGIN_OUTDATED_HERE` (503, retried); it serves them once it reconciles,
-  within seconds.
+- **Settings are served only where their plugin is.** A server reads, saves or
+  deletes a plugin's settings only while it has the plugin loaded at the version
+  the fleet published; otherwise every settings route answers a retryable 503
+  that names the plugin and changes nothing: `PLUGIN_NOT_LOADED_HERE` (another
+  server serves it; the gateway moves you there), `PLUGIN_NOT_LOADED` (no live
+  server loads it), `PLUGIN_OUTDATED_HERE` (this server runs another version and
+  serves once it reconciles, within seconds) or `PLUGIN_DISABLED`. A settings
+  dialog shows such a plugin's saved settings as unavailable, with the reason in
+  place of the form.
 - **Schema versions.** The archive records the source database's schema version
   and each table's columns. It restores onto a server of the same or a newer
   build, which has started once (so its database is migrated); a column the

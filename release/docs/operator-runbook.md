@@ -319,11 +319,26 @@ this when the field is left empty. A save that leaves a stored secret out, null
 or empty, or sends a ref the item does not hold (or one read before the secret
 was set again), is refused with `secret_not_stored`: re-enter the secret, or
 clear it on purpose. A station's token is required, so it can never be cleared
-or left empty (`secret_required`): enter one.
+or left empty (`secret_required`): enter one. Every new value typed for a secret
+gets a new ref, even the value already stored. A secret stored before this
+release gets its ref when its plugin loads, so saving the settings unchanged
+keeps it.
 
-A server not yet running a plugin's published version refuses saves of that
-plugin's settings with `PLUGIN_OUTDATED_HERE` (503 with `Retry-After`); it
-serves them once it reconciles, within seconds, so a retry lands.
+A server reads, saves or deletes a plugin's settings only while it serves that
+plugin: it has the plugin loaded at the version the fleet published. Otherwise
+every settings route (read, save, delete, the plugin's own settings list, the
+config issues) answers a retryable 503, with `Retry-After`, that names the
+plugin, and changes or removes nothing:
+
+- `PLUGIN_NOT_LOADED_HERE`: another live server serves it. The gateway moves the
+  browser there; retry in a moment.
+- `PLUGIN_NOT_LOADED`: no live server loads it.
+- `PLUGIN_OUTDATED_HERE`: this server runs another version; it serves once it
+  reconciles, within seconds.
+- `PLUGIN_DISABLED`: an administrator disabled it.
+
+A problem's, contest's or contest problem's settings dialog shows such a
+plugin's saved settings as unavailable, with the reason in place of the form.
 
 The export reads each plugin's schema from its published upload or the server's
 plugin directory. The configs of a plugin with neither (removed, or never
