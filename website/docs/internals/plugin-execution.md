@@ -257,9 +257,15 @@ what a request needed of it answers `AppError::PluginFailed`: the client sees
 the host's internal error, and the plugin's text goes only to the host's line
 about the plugin (`PluginFailure::new` bounds the text when the error is
 built, so its debug print is bounded too), and its response is marked
-(`error::PluginCaused`), so the HTTP trace layer, which logs every other 5xx
-as the host's `ERROR`, does not log it again: a contestant calling a failing
-plugin route at will writes only lines under that plugin's budget. A host
+(`error::PluginCaused`), so the HTTP trace layer, which logs a host failure
+(`error::is_host_failure`) as the host's `ERROR`, does not log it again: a
+contestant calling a failing plugin route at will writes only lines under that
+plugin's budget. A designed state is not a failure either: an answer whose
+code is marked `retryable` (`HostCode::is_retryable`, every code answered with
+`Retry-After`: an outage, a plugin out, a full queue) and a not-ready
+`/readyz` are marked `error::DesignedState` and logged at `DEBUG`, so a
+gateway probing readiness or a client retrying an outage never fills the log
+with host errors; an internal error stays an `ERROR`. A host
 line about a plugin that carries the host's own error (a database or queue
 failure) logs it as `host_error`. `tests/integration/source_invariants.rs`
 checks that in the server and the plugin runtime no log line at any level
