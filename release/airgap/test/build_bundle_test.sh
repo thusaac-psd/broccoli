@@ -20,7 +20,7 @@ for p in bundle.json manifest.sha256 ca/root.crt caddy/Caddyfile.airgap \
          lib/release-lib.sh lib/env.sh lib/host.sh lib/plugins.sh \
          load-bundle.sh install.sh setup.sh trust-ca/linux.sh compose ca/issue-leaf.sh ca/sign.sh \
          lib/manifest.sh lib/runtime.sh lib/answers.sh lib/envgen.sh \
-         lib/preflight.sh native/live-boot-preflight.sh; do
+         lib/preflight.sh native/live-boot-preflight.sh pgbouncer/user-lookup.sql; do
   [ -e "$b/$p" ] || { echo "FAIL: bundle missing $p"; exit 1; }
 done
 [ -x "$b/native/live-boot-preflight.sh" ] || { echo "FAIL: staged preflight not executable"; exit 1; }
