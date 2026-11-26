@@ -1482,8 +1482,9 @@ mod tests {
             identity: vec![plugin_core::manifest::SecretStep::Field("token".into())],
             id: "r".into(),
         }];
+        // The fleet enabled `p`; this replica reports it in `status`.
         let reporting = |status| {
-            PluginLifecycle::reporting(
+            let lifecycle = PluginLifecycle::reporting(
                 [(
                     "p".to_string(),
                     ReplicaPluginState {
@@ -1496,7 +1497,9 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
-            )
+            );
+            lifecycle.set_desired("p", true);
+            lifecycle
         };
         let current = reporting(ReplicaPluginStatus::Loaded);
         let served = shown(
@@ -1535,8 +1538,9 @@ mod tests {
         use crate::plugin_fleet::{ReplicaPluginState, ReplicaPluginStatus};
         use crate::plugin_lifecycle::PluginLifecycle;
         let registry = registry_with_a_secret();
+        // The fleet enabled `p`; this replica reports it in `status`.
         let reporting = |status| {
-            PluginLifecycle::reporting(
+            let lifecycle = PluginLifecycle::reporting(
                 [(
                     "p".to_string(),
                     ReplicaPluginState {
@@ -1549,7 +1553,9 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
-            )
+            );
+            lifecycle.set_desired("p", true);
+            lifecycle
         };
         let current = reporting(ReplicaPluginStatus::Loaded);
         assert!(
