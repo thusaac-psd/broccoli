@@ -45,19 +45,17 @@ docker compose --env-file .env.gateway -f docker-compose.gateway.yaml logs --tai
 Each server answers three probes and `/metrics` on its main HTTP port:
 
 - `/livez`, liveness: the process is up and serving HTTP. It calls nothing else.
-- `/readyz`, readiness: this server should take browsers. It answers 503
-  `"not_ready"` while another server serves every enabled plugin this one serves
-  and more: a plugin is loaded there but not here (its load keeps failing, or
-  its files are missing), so a browser pinned here would miss it, whatever it
-  provides (a contest type, a language, an evaluator, a checker, a page or
-  route), until the load succeeds. A request here that needs it answers
-  `503 PLUGIN_NOT_LOADED_HERE`, naming the plugin in `details.plugin_id`, and a
-  result it governs reads as withheld (`not_loaded_here`). The answer carries
-  `Retry-After: 10`: two failed probes five seconds apart, after which the
-  gateway sends the retry to a server that serves it. Servers that each lack a
-  different plugin, or a plugin no server could load, are all ready, so the
-  gateway always keeps a server. It makes no database or Redis call, and its
-  body never names a plugin.
+- `/readyz`, readiness: this server should take browsers. A server is ready
+  unless it lacks an enabled plugin that another live server serves, whatever
+  the plugin provides (a contest type, a language, an evaluator, a checker, a
+  page or route). A server counts as serving a plugin only in the version the
+  fleet published, not an outdated or mismatched copy. Its absence counts only
+  once the server has applied the plugin's newest publish, so an enable, reload
+  or upload never takes the servers still loading it out of rotation. If every
+  server lacks something another has, the fleet is misconfigured and the System
+  page says so; the gateway keeps one server ready, the one serving the most
+  plugins (then the lowest server id). It answers 503 `"not_ready"` otherwise,
+  makes no database or Redis call, and its body never names a plugin.
 - `/healthz`, the deep check for monitoring: it also reaches Postgres, Redis and
   blob storage (below). It is never a gateway probe: the servers share those, so
   one blip would fail it on every server at once.
@@ -74,16 +72,22 @@ is ready, and the plugins it lacks while another server serves them; the admin
 plugin page shows each server's load state and error, and the server's logs have
 the rest. Fix the load and click Reload.
 
-Readiness compares a server with every other server that shares its database and
-whose heartbeat is fresh: servers touch it every 15 s, and one counts for 30 s
-after its last touch, so a server that died, or stopped without leaving cleanly,
-stops holding the others out of rotation within half a minute. Every server on
-one database therefore belongs behind the same gateway: a server outside it
-still counts, and can keep the gateway's servers not ready for a plugin only it
-serves while the gateway cannot send it a browser. If servers are ejected under
-load while their logs show them still serving, raise `health_timeout` or
-`health_fails` there and restart the gateway. A Prometheus scrape of `/metrics`
-can likewise time out under load; give it a scrape timeout of a few seconds.
+A request on a server that lacks a plugin answers `503 PLUGIN_NOT_LOADED_HERE`
+(`Retry-After: 10`, naming the plugin in `details.plugin_id`; a result the
+plugin governs reads as withheld, `not_loaded_here`) only while a ready server
+has it, so the retry reaches that server once the gateway has moved the browser;
+otherwise it answers `PLUGIN_NOT_LOADED`, naming the plugin.
+
+A server is live while it touched its heartbeat in the last 15 s (it touches it
+every 5 s), about as long as the gateway takes to eject a failing server, so a
+server that died, or stopped without leaving cleanly, stops counting within that
+window. Every server on one database belongs behind the same gateway: a server
+outside it still counts, and can keep the gateway's servers not ready for a
+plugin only it serves while the gateway cannot send it a browser. If servers are
+ejected under load while their logs show them still serving, raise
+`health_timeout` or `health_fails` there and restart the gateway. A Prometheus
+scrape of `/metrics` can likewise time out under load; give it a scrape timeout
+of a few seconds.
 
 `/healthz` answers 200 with `"status": "ok"` while no dependency is down, and
 503 with `"status": "degraded"` and the component that is (`"db"`, `"mq"` or
@@ -360,6 +364,11 @@ docker compose --env-file .env.server -f docker-compose.server.yaml logs -f serv
 docker compose --env-file .env.worker -f docker-compose.worker.yaml logs -f worker
 docker compose --env-file .env.infra -f docker-compose.infra.yaml logs -f db redis seaweedfs
 ```
+
+Designed retryable answers, every answer that carries `Retry-After` and a
+`/readyz` that is not ready, log at DEBUG, not ERROR: they say a dependency or a
+plugin is not available here yet, which the client retries, not that something
+broke. An ERROR line is worth an alert.
 
 For worker sandbox failures, first confirm the worker service is privileged and
 that the worker host uses cgroup v2.
