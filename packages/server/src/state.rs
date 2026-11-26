@@ -79,7 +79,7 @@ impl AppState {
     pub async fn known_keys(
         &self,
         kind: broccoli_api_types::visibility::Provided,
-    ) -> std::collections::HashSet<String> {
+    ) -> crate::providers::KnownKeys {
         let mut known = self.plugin_lifecycle.recorded_keys(kind);
         known.extend(
             crate::providers::Loaded::here(&self.registries)
@@ -88,11 +88,14 @@ impl AppState {
                 .keys()
                 .cloned(),
         );
-        known
+        let (closed, open) = known
+            .into_iter()
+            .partition(|key| self.plugin_lifecycle.key_closure(kind, key).is_some());
+        crate::providers::KnownKeys { open, closed }
     }
 
     /// The languages work may name ([`Self::known_keys`]).
-    pub async fn known_languages(&self) -> std::collections::HashSet<String> {
+    pub async fn known_languages(&self) -> crate::providers::KnownKeys {
         self.known_keys(broccoli_api_types::visibility::Provided::Language)
             .await
     }

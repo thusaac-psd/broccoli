@@ -468,7 +468,7 @@ pub async fn admin_fan_out_submission(
     let txn = state.db.begin().await?;
 
     let problem = find_problem(&txn, payload.problem_id).await?;
-    let known_languages: std::collections::HashSet<String> = state.known_languages().await;
+    let known_languages = state.known_languages().await;
     validate_submission_contract(
         &payload.files,
         &payload.language,

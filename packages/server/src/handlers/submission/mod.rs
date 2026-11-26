@@ -155,7 +155,7 @@ pub async fn create_submission(
     {
         return Err(AppError::NotFound("Problem not found".into()));
     }
-    let known_languages: std::collections::HashSet<String> = state.known_languages().await;
+    let known_languages = state.known_languages().await;
     validate_submission_contract(
         &payload.files,
         &payload.language,
@@ -772,7 +772,7 @@ pub async fn create_contest_submission(
     let now = state.clock.now();
     require_contest_running(&auth_user, &contest_model, now)?;
     require_contest_participant(&state.db, &auth_user, &contest_model).await?;
-    let known_languages: std::collections::HashSet<String> = state.known_languages().await;
+    let known_languages = state.known_languages().await;
     validate_submission_contract(
         &payload.files,
         &payload.language,
