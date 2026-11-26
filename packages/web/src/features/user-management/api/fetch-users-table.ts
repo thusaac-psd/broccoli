@@ -35,7 +35,7 @@ function sortUsers(
     } else if (sortBy === 'display_name') {
       result = compareStrings(left.display_name, right.display_name);
     } else if (sortBy === 'roles') {
-      result = compareStrings(left.roles.join(', '), right.roles.join(', '));
+      result = compareStrings(left.roles.join('\n'), right.roles.join('\n'));
     } else {
       result = compareDates(left.created_at, right.created_at);
     }

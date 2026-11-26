@@ -8,6 +8,7 @@ import {
   registryChoiceLabel,
 } from '@broccoli/web-sdk/hooks';
 import {
+  formatList,
   pluginName,
   useIdentifierLabel,
   useTranslation,
@@ -175,7 +176,7 @@ function CodeEditorContent({
   availableLanguages: Language[];
   closedLanguages: ClosedLanguage[];
 }) {
-  const { t, lookup } = useTranslation();
+  const { t, lookup, locale } = useTranslation();
   const label = useIdentifierLabel();
   const errorMessage = useErrorMessage();
   const { user, isLoading: authLoading } = useAuth();
@@ -415,10 +416,10 @@ function CodeEditorContent({
       if (preview.skipped.length === read.files.length) {
         toast.error(
           t('editor.uploadNoMatch', {
-            required: getConfiguredFilenames(
-              language.id,
-              submissionFormat,
-            ).join(', '),
+            required: formatList(
+              getConfiguredFilenames(language.id, submissionFormat),
+              locale,
+            ),
           }),
         );
         return;
@@ -433,11 +434,11 @@ function CodeEditorContent({
       if (preview.skipped.length > 0) {
         toast.warning(
           t('editor.uploadSkipped', {
-            files: preview.skipped.join(', '),
-            required: getConfiguredFilenames(
-              language.id,
-              submissionFormat,
-            ).join(', '),
+            files: formatList(preview.skipped, locale),
+            required: formatList(
+              getConfiguredFilenames(language.id, submissionFormat),
+              locale,
+            ),
           }),
         );
       }
@@ -445,6 +446,7 @@ function CodeEditorContent({
     [
       availableLanguages,
       draft,
+      locale,
       selectedLanguage,
       storageKey,
       submissionFormat,

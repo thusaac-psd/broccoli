@@ -28,8 +28,8 @@ function sortRoles(
       result = compareNumbers(left.permission_count, right.permission_count);
     } else if (sortBy === 'permissions') {
       result = compareStrings(
-        left.permissions.join(', '),
-        right.permissions.join(', '),
+        left.permissions.join('\n'),
+        right.permissions.join('\n'),
       );
     } else {
       result = compareStrings(left.role, right.role);

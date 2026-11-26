@@ -327,6 +327,14 @@ export default defineConfig([
             "Poll through the query's own refetchInterval with pollInterval() from @broccoli/web-sdk/hooks, never a timer that calls refetch().",
         },
         {
+          // A list a user reads is joined the way their language lists
+          // names ("a, b and c", "a、b和c"), never with an English comma.
+          selector:
+            "CallExpression[callee.property.name='join'] > Literal[value=/^(, |; |、|，|；)$/]",
+          message:
+            'Join a list a user reads with useFormat().list (or formatList) from @broccoli/web-sdk/i18n.',
+        },
+        {
           // A server's `message` is English detail for logs; what the user
           // reads comes from useErrorMessage(), which translates by code.
           selector:

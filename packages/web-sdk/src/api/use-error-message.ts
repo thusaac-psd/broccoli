@@ -22,9 +22,10 @@ export function useDescribeError(): (
   err: unknown,
   failure: string,
 ) => ErrorDescription {
-  const { lookup } = useTranslation();
+  const { lookup, locale } = useTranslation();
   return useCallback(
-    (err: unknown, failure: string) => describeError(err, failure, { lookup }),
-    [lookup],
+    (err: unknown, failure: string) =>
+      describeError(err, failure, { lookup, locale }),
+    [lookup, locale],
   );
 }

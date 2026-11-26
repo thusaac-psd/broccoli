@@ -2,7 +2,7 @@ import { useErrorMessage } from '@broccoli/web-sdk/api';
 /**
  * Visual subtask definition editor for IOI-style contest problems.
  */
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { formatList, useTranslation } from '@broccoli/web-sdk/i18n';
 import type { TestCaseSummary } from '@broccoli/web-sdk/problem';
 import type { ConfigFieldSlotProps } from '@broccoli/web-sdk/slot';
 import { InheritedBadge } from '@broccoli/web-sdk/slot';
@@ -875,7 +875,7 @@ export function SubtaskEditor({
   showAsPlaceholder,
   inheritedSource,
 }: ConfigFieldSlotProps) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const errorMessage = useErrorMessage();
   const subtasks: SubtaskValue[] = Array.isArray(value)
     ? (value as Record<string, unknown>[]).map((raw) => ({
@@ -1541,13 +1541,14 @@ export function SubtaskEditor({
                             ? tc.label
                             : `#${tc.position + 1}`
                           : label;
-                        const names = indices
-                          .map(
+                        const names = formatList(
+                          indices.map(
                             (i) =>
                               subtasks[i]?.name ||
                               t('ioi.subtask.defaultName', { index: i + 1 }),
-                          )
-                          .join(', ');
+                          ),
+                          locale,
+                        );
                         return (
                           <div
                             key={label}

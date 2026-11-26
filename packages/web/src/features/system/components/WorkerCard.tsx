@@ -111,7 +111,7 @@ export function WorkerCard({ worker, stale }: Props) {
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
           <span>
             {t('system.worker.missingTools', {
-              tools: worker.missing_platform_tools.join(', '),
+              tools: format.list(worker.missing_platform_tools),
             })}
           </span>
         </div>

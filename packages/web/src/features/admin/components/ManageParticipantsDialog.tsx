@@ -10,6 +10,7 @@ import {
   useQueryState,
 } from '@broccoli/web-sdk/hooks';
 import {
+  formatList,
   useFormat,
   useIdentifierLabel,
   useTranslation,
@@ -243,7 +244,7 @@ function AddParticipantsTab({
   contest: ContestSummary;
   participants: ParticipantItem[];
 }) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const label = useIdentifierLabel();
   const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
@@ -381,7 +382,10 @@ function AddParticipantsTab({
                   <td className="px-3 py-2 font-medium">{u.username}</td>
                   <td className="px-3 py-2">{u.display_name}</td>
                   <td className="px-3 py-2 text-muted-foreground">
-                    {u.roles.map((r) => label('role', r)).join(', ')}
+                    {formatList(
+                      u.roles.map((r) => label('role', r)),
+                      locale,
+                    )}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <Button
@@ -416,7 +420,7 @@ function PreviewUserTable({
   title: string;
   users: UserPreviewItem[];
 }) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const label = useIdentifierLabel();
   if (users.length === 0) return null;
   return (
@@ -451,7 +455,10 @@ function PreviewUserTable({
               <td className="px-3 py-2">{user.username}</td>
               <td className="px-3 py-2">{user.display_name}</td>
               <td className="px-3 py-2">
-                {user.roles.map((r) => label('role', r)).join(', ')}
+                {formatList(
+                  user.roles.map((r) => label('role', r)),
+                  locale,
+                )}
               </td>
             </tr>
           ))}

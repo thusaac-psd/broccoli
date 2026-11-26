@@ -1,4 +1,4 @@
-import { pluginName, useTranslation } from '@broccoli/web-sdk/i18n';
+import { formatList, pluginName, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
 import { CircleDot } from 'lucide-react';
 
@@ -14,7 +14,7 @@ interface Props {
  * which `/readyz` itself never names.
  */
 export function ServerReadinessList({ servers }: Props) {
-  const { t, lookup } = useTranslation();
+  const { t, lookup, locale } = useTranslation();
 
   if (servers.length === 0) {
     return (
@@ -53,9 +53,10 @@ export function ServerReadinessList({ servers }: Props) {
           {server.missing.length > 0 && (
             <p className="text-xs text-muted-foreground">
               {t('system.servers.missing', {
-                plugins: server.missing
-                  .map((id) => pluginName(lookup, id))
-                  .join(', '),
+                plugins: formatList(
+                  server.missing.map((id) => pluginName(lookup, id)),
+                  locale,
+                ),
               })}
             </p>
           )}
