@@ -340,6 +340,53 @@ const PRINT_JOB = {
 };
 
 /** Answers for the plugins of this repository that the browser suite serves. */
+/** What `GET /admin/system/overview` answers. */
+export const SYSTEM_OVERVIEW = {
+  queue_state: 'reachable',
+  workers_stale: false,
+  // A live worker that lacks a platform tool: the fleet takes no work.
+  workers: [
+    {
+      id: 'lab-pc-07',
+      started_at: '2025-10-01T14:00:00Z',
+      last_seen: '2025-10-01T14:30:00Z',
+      seconds_since_last_seen: 1,
+      in_flight: 0,
+      max_concurrency: 1,
+      fairness_mode: 'pinned',
+      sandbox_backend: 'isolate',
+      version: '0.1.0',
+      hostname: 'lab-pc-07',
+      ip_addresses: ['192.168.1.17'],
+      os: 'linux',
+      arch: 'x86_64',
+      cpu_count: 8,
+      pid: 4242,
+      missing_platform_tools: ['broccoli-compare'],
+      accepting_work: false,
+    },
+  ],
+  intake: 'none_accepting',
+  queues: [
+    {
+      name: 'operation_tasks',
+      depth: 0,
+      breakdown: { unread: 0, pending: 0 },
+    },
+    {
+      name: 'operation_tasks:reply:server-8f3a2c1d9e7b4a6f',
+      depth: 0,
+      breakdown: { unread: 0, pending: 0 },
+    },
+  ],
+  servers: [{ server_id: 'server-8f3a2c1d9e7b4a6f', ready: true, missing: [] }],
+  servers_mixed: false,
+  submissions_in_progress: 0,
+  submissions_queued: 3,
+  submissions_parked: 0,
+  dlq_unresolved_count: 0,
+};
+
 export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
   [
     'GET',
@@ -541,57 +588,7 @@ const ROUTES: [string, RegExp, Handler][] = [
       config_issues: false,
     }),
   ],
-  [
-    'GET',
-    /^\/admin\/system\/overview$/,
-    () => ({
-      queue_state: 'reachable',
-      workers_stale: false,
-      // A live worker that lacks a platform tool: the fleet takes no work.
-      workers: [
-        {
-          id: 'lab-pc-07',
-          started_at: '2025-10-01T14:00:00Z',
-          last_seen: '2025-10-01T14:30:00Z',
-          seconds_since_last_seen: 1,
-          in_flight: 0,
-          max_concurrency: 1,
-          fairness_mode: 'pinned',
-          sandbox_backend: 'isolate',
-          version: '0.1.0',
-          hostname: 'lab-pc-07',
-          ip_addresses: ['192.168.1.17'],
-          os: 'linux',
-          arch: 'x86_64',
-          cpu_count: 8,
-          pid: 4242,
-          missing_platform_tools: ['broccoli-compare'],
-          accepting_work: false,
-        },
-      ],
-      intake: 'none_accepting',
-      queues: [
-        {
-          name: 'operation_tasks',
-          depth: 0,
-          breakdown: { unread: 0, pending: 0 },
-        },
-        {
-          name: 'operation_tasks:reply:server-8f3a2c1d9e7b4a6f',
-          depth: 0,
-          breakdown: { unread: 0, pending: 0 },
-        },
-      ],
-      servers: [
-        { server_id: 'server-8f3a2c1d9e7b4a6f', ready: true, missing: [] },
-      ],
-      servers_mixed: false,
-      submissions_in_progress: 0,
-      submissions_queued: 3,
-      submissions_parked: 0,
-      dlq_unresolved_count: 0,
-    }),
-  ],
+  ['GET', /^\/admin\/system\/overview$/, () => SYSTEM_OVERVIEW],
   [
     'GET',
     /^\/admin\/plugins$/,

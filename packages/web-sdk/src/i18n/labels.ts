@@ -55,11 +55,6 @@ export const pluginKeys = {
   configTitle: (pluginId: string, namespace: string) =>
     `config.${pluginId}.${namespace}.title`,
   /**
-   * A schema field's title, description or unit. The key names the field as the
-   * schema declares it, so the fields of every item of an array share one
-   * key: the item positions in `path` are left out.
-   */
-  /**
    * The title of option `value` of a schema field's enum. Like a field's
    * own text, the key names the field as the schema declares it.
    */
@@ -70,6 +65,11 @@ export const pluginKeys = {
     value: string,
   ) =>
     `config.${pluginId}.${namespace}.${path.filter((segment) => !/^\d+$/.test(segment)).join('.')}.options.${value}`,
+  /**
+   * A schema field's title, description or unit. The key names the field as the
+   * schema declares it, so the fields of every item of an array share one
+   * key: the item positions in `path` are left out.
+   */
   configField: (
     pluginId: string,
     namespace: string,

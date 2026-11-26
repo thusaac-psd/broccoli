@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@broccoli/web-sdk/i18n';
 import type {
   ClosedBy,
   ClosedLanguage,
@@ -61,7 +62,7 @@ export function languagesClosed({ open, closed }: ProblemLanguages): boolean {
 /**
  * Whether a problem's own answer is worth asking for again: it names a
  * plugin that closes it or one of its languages, or (in practice) its
- * contest type is out of reach. Each ends when a plugin is back.
+ * contest type is out, in any state. Each ends when a plugin is back.
  */
 export function problemClosed(
   scope: 'contest' | 'practice',
@@ -70,7 +71,7 @@ export function problemClosed(
   return (
     !!problem?.closed_by ||
     (problem?.closed_languages?.length ?? 0) > 0 ||
-    (scope === 'practice' && problem?.plugin_outage?.state === 'unavailable')
+    (scope === 'practice' && !!problem?.plugin_outage)
   );
 }
 
@@ -82,15 +83,15 @@ export function problemClosed(
  * - `closed`: a plugin the submission needs is disabled (`ClosedBy`): its
  *   contest type's, its evaluator, its checker, or the plugin of every
  *   language it takes.
- * - `unavailable`: the practice contest type has no handler on this server
- *   right now; a retry may succeed.
+ * - `practice`: the problem's practice contest type is out (`outage`, in
+ *   any state), which closes its submissions but withholds no contest.
  * - `noLanguage`: no language it takes is available to write in, and no
  *   plugin accounts for it.
  */
 export type SubmitClosure =
   | { kind: 'contest'; outage: PluginOutage }
   | { kind: 'closed'; closedBy: ClosedBy }
-  | { kind: 'unavailable' }
+  | { kind: 'practice'; outage: PluginOutage }
   | { kind: 'noLanguage' };
 
 /**
@@ -114,8 +115,8 @@ export function submitClosure(
   }
   if (problem?.closed_by)
     return { kind: 'closed', closedBy: problem.closed_by };
-  if (scope === 'practice' && problem?.plugin_outage?.state === 'unavailable') {
-    return { kind: 'unavailable' };
+  if (scope === 'practice' && problem?.plugin_outage) {
+    return { kind: 'practice', outage: problem.plugin_outage };
   }
   if (problem && languages?.open.length === 0) {
     const [first] = languages.closed;
@@ -125,3 +126,27 @@ export function submitClosure(
   }
   return null;
 }
+
+/**
+ * What a contest-type outage says, by where it is read: a contest's
+ * withholds its results and closes its submissions, a practice problem's
+ * closes only its submissions. Typed against every outage state, so one the
+ * server adds fails to compile until it has a text in both.
+ */
+export const OUTAGE_TEXT = {
+  contest: {
+    disabled: 'contests.pluginOutage.disabled',
+    not_loaded: 'contests.pluginOutage.notLoaded',
+    not_loaded_here: 'contests.pluginOutage.notLoadedHere',
+    unavailable: 'contests.pluginOutage.unavailable',
+  },
+  practice: {
+    disabled: 'problem.pluginOutage.disabled',
+    not_loaded: 'problem.pluginOutage.notLoaded',
+    not_loaded_here: 'problem.pluginOutage.notLoadedHere',
+    unavailable: 'problem.pluginOutage.unavailable',
+  },
+} as const satisfies Record<
+  'contest' | 'practice',
+  Record<PluginOutage['state'], TranslationKey>
+>;

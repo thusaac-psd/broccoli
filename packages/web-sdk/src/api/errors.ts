@@ -1,5 +1,6 @@
 import type { components } from '@/api/schema';
 
+import { formatList } from '../i18n/format.ts';
 import { pluginName } from '../i18n/labels.ts';
 
 /**
@@ -224,6 +225,8 @@ export function isTemporaryApiError(err: unknown): boolean {
 
 /** The translation lookups `describeError` needs (from `useTranslation`). */
 export interface ErrorTranslator {
+  /** The UI language, for the lists a message names. */
+  locale: string;
   lookup: (
     key: string,
     params?: Record<string, string | number>,
@@ -251,7 +254,7 @@ export function errorCodeKey(code: string): string {
  */
 export function errorCodeText(
   code: string,
-  { lookup }: ErrorTranslator,
+  { lookup }: Pick<ErrorTranslator, 'lookup'>,
 ): string | undefined {
   return lookup(errorCodeKey(code)) || undefined;
 }
@@ -263,12 +266,13 @@ export function errorKindKey(kind: ErrorKind): string {
 
 /**
  * `details` as message parameters: its top-level strings and numbers, and its
- * lists of them (such as the `usernames` a conflict names) joined by commas.
+ * lists of them (such as the `usernames` a conflict names) joined as the
+ * UI language lists names (`formatList`).
  * A `plugin_id` is also given as `plugin`, the plugin's name (`pluginName`).
  */
 function detailParams(
   details: unknown,
-  lookup: ErrorTranslator['lookup'],
+  { lookup, locale }: ErrorTranslator,
 ): Record<string, string | number> {
   const params: Record<string, string | number> = {};
   if (typeof details !== 'object' || details === null) return params;
@@ -276,7 +280,7 @@ function detailParams(
     if (typeof value === 'string' || typeof value === 'number') {
       params[key] = value;
     } else if (Array.isArray(value) && value.every(isScalar)) {
-      params[key] = value.join(', ');
+      params[key] = formatList(value.map(String), locale);
     }
   }
   if (typeof params.plugin_id === 'string') {
@@ -352,14 +356,15 @@ export function retryCanFix(kind: ErrorKind): boolean {
 export function describeError(
   err: unknown,
   failure: string,
-  { lookup }: ErrorTranslator,
+  translator: ErrorTranslator,
 ): ErrorDescription {
+  const { lookup } = translator;
   const kind = errorKind(err);
   if (err instanceof TranslatedError) return { kind, message: err.message };
   const parsed = parseApiError(err);
   const byCode =
     parsed &&
-    lookup(errorCodeKey(parsed.code), detailParams(parsed.details, lookup));
+    lookup(errorCodeKey(parsed.code), detailParams(parsed.details, translator));
   if (byCode) return { kind, message: byCode };
   const detail = parsed?.message;
   if (isRefusal(kind) && detail) {

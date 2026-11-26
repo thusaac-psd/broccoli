@@ -1,4 +1,4 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { formatList, useTranslation } from '@broccoli/web-sdk/i18n';
 import { cn } from '@broccoli/web-sdk/utils';
 
 import { isActivelyPlaying } from './lib/phase';
@@ -26,7 +26,7 @@ const PIP_LABEL: Record<Pip, string> = {
 };
 
 function Pips({ match, playerId }: { match: MatchView; playerId: number }) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const pips = gamePips(match, playerId);
   const labels = pips.map(
     (pip, index) =>
@@ -35,7 +35,7 @@ function Pips({ match, playerId }: { match: MatchView; playerId: number }) {
   return (
     <span
       role="img"
-      aria-label={labels.join('; ')}
+      aria-label={formatList(labels, locale)}
       className="flex min-w-0 items-center gap-1 overflow-x-auto"
     >
       {pips.map((p, i) => (

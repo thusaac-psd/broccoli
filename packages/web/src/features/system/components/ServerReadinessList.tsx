@@ -1,4 +1,4 @@
-import { pluginName, useTranslation } from '@broccoli/web-sdk/i18n';
+import { formatList, pluginName, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
 import { CircleDot, TriangleAlert } from 'lucide-react';
 
@@ -17,7 +17,7 @@ interface Props {
  * plugins is shown as misconfigured.
  */
 export function ServerReadinessList({ servers, mixed }: Props) {
-  const { t, lookup } = useTranslation();
+  const { t, lookup, locale } = useTranslation();
 
   if (servers.length === 0) {
     return (
@@ -69,9 +69,10 @@ export function ServerReadinessList({ servers, mixed }: Props) {
             {server.missing.length > 0 && (
               <p className="text-xs text-muted-foreground">
                 {t('system.servers.missing', {
-                  plugins: server.missing
-                    .map((id) => pluginName(lookup, id))
-                    .join(', '),
+                  plugins: formatList(
+                    server.missing.map((id) => pluginName(lookup, id)),
+                    locale,
+                  ),
                 })}
               </p>
             )}

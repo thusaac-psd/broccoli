@@ -58,6 +58,7 @@ const catalog: Record<string, string> = {
   'apiError.withDetail': '{message} ({detail})',
 };
 const translator = {
+  locale: 'en',
   lookup: (key: string, params?: Record<string, string | number>) => {
     const text = catalog[key];
     return text?.replace(/\{(\w+)\}/g, (_, name) => String(params?.[name]));
@@ -83,22 +84,27 @@ test('a translated code wins, with the details as parameters', () => {
   );
 });
 
-test('a list in the details is a parameter of its items, comma separated', () => {
+test('a list in the details is a parameter of its items, as the locale lists them', () => {
   const taken = new RequestError(
     409,
     'USERNAME_TAKEN',
     'Usernames already taken: ann, bob',
-    { usernames: ['ann', 'bob'] },
+    { usernames: ['ann', 'bob', 'cy'] },
   );
-  const names = {
+  const names = (locale: string) => ({
+    locale,
     lookup: (key: string, params?: Record<string, string | number>) =>
       key === 'apiError.USERNAME_TAKEN'
         ? `Taken: ${String(params?.usernames)}`
         : undefined,
-  };
+  });
   assert.equal(
-    describeError(taken, 'Failed', names).message,
-    'Taken: ann, bob',
+    describeError(taken, 'Failed', names('en')).message,
+    'Taken: ann, bob, and cy',
+  );
+  assert.equal(
+    describeError(taken, 'Failed', names('zh-CN')).message,
+    'Taken: ann、bob和cy',
   );
 });
 
@@ -173,6 +179,7 @@ test("a plugin's refusal is described from that plugin's pack only", () => {
     'apiError.kind.forbidden': 'Not allowed',
   };
   const translator = {
+    locale: 'en',
     lookup: (key: string, params?: Record<string, string | number>) =>
       catalog[key]?.replace(/\{(\w+)\}/g, (_, name) => String(params?.[name])),
   };
@@ -230,7 +237,7 @@ test('an untranslated refusal with nothing said reads as its kind or what failed
     'apiError.kind.rateLimited': 'Too many requests',
     'apiError.kind.unauthenticated': 'Sign in',
   };
-  const lookup = { lookup: (key: string) => kinds[key] };
+  const lookup = { locale: 'en', lookup: (key: string) => kinds[key] };
   const read = (status: number) =>
     describeError(new RequestError(status, 'x.CODE'), 'Failed', lookup).message;
   assert.equal(read(403), 'Not allowed');
@@ -279,6 +286,7 @@ test("an error that names a plugin says it by the plugin's translated name, else
     'plugin.icpc.name': 'ICPC',
   };
   const translator = {
+    locale: 'en',
     lookup: (key: string, params?: Record<string, string | number>) =>
       catalog[key]?.replace(/\{(\w+)\}/g, (_, name) => String(params?.[name])),
   };
