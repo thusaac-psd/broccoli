@@ -544,6 +544,15 @@ async fn the_checker_language_is_derived_by_the_one_rule() {
         {"namespace": "checker_source", "format": "testlib", "extension": "c", "language": "c"},
         {"namespace": "checker_source", "format": "testlib", "extension": "cpp", "language": "cpp"},
         {"namespace": "checker_source", "format": "testlib", "extension": "cc", "language": "cpp"},
+        // Pattern characters are plain text, never wildcards.
+        {"namespace": "checker_source", "format": "testlib", "extension": "c_p", "language": "wild"},
+        {"namespace": "checker_source", "format": "testlib", "extension": "x%", "language": "wild"},
+        // Languages sharing an extension tie by language, bytewise, whatever
+        // order they are declared in.
+        {"namespace": "checker_source", "format": "testlib", "extension": "h", "language": "zeta"},
+        {"namespace": "checker_source", "format": "testlib", "extension": "h", "language": "alpha"},
+        // Only ASCII letters fold.
+        {"namespace": "checker_source", "format": "testlib", "extension": "é", "language": "accent"},
     ]);
     let governs = |languages: &serde_json::Value| {
         serde_json::json!({
@@ -590,7 +599,7 @@ async fn the_checker_language_is_derived_by_the_one_rule() {
             files(names)
         )
     };
-    let sources: [&[&str]; 7] = [
+    let sources: [&[&str]; 14] = [
         &["testlib.h", "check.cpp"],
         &["check.c", "other.cpp"],
         &["README", "CHECK.CPP"],
@@ -598,6 +607,13 @@ async fn the_checker_language_is_derived_by_the_one_rule() {
         &["testlib.h"],
         &["check.cpp.txt", "a.c"],
         &[],
+        &["check.cpp"],
+        &["a.xyz", "b.x%"],
+        &["a.H"],
+        &["check.é"],
+        &["check.É"],
+        &["noextension", ".c"],
+        &["trailing.", "a.c"],
     ];
     for names in sources {
         db.execute_unprepared(&store(names)).await.unwrap();

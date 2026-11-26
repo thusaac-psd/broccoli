@@ -410,7 +410,9 @@ checker_languages = { cpp = ["cpp", "cc", "cxx"], c = ["c"] }
 ```
 
 A problem's checker language is the language of the first stored file whose
-extension, compared case-insensitively, is listed. The host derives it each
+extension (the text after its last `.`) is listed, ASCII letters compared
+case-insensitively. When several languages list that extension, the first by
+name, bytewise, wins. The host derives it each
 time it needs it, only for a problem whose checker format is listed in
 `compiles` and whose fleet-wide provider is your plugin, so it always follows
 the stored source. Work on the problem then needs that language's plugin as it

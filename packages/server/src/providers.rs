@@ -343,14 +343,21 @@ pub(crate) fn sql_needs(
 /// fleet-wide provider whose checker compiles the source
 /// (`Governs::checker_languages` entries of that format): the language of
 /// the first file of the problem's stored source, in stored order, whose
-/// extension, compared case-insensitively, the provider declares; NULL
-/// otherwise. Derived wherever it is needed, never stored, so it follows the
-/// source, the declaration and the provider as they are now. The SQL form
-/// of `broccoli_types::manifest::checker_language`, pinned to it by
-/// `migration::tests::the_checker_language_is_derived_by_the_one_rule`.
-/// Both inputs are bound first, in `input`, so the aliases inside (the
-/// provider's `p` among them) never shadow what they name.
+/// extension (the text after its last `.`) equals one the provider declares,
+/// ASCII letters compared case-insensitively, and of the languages declaring
+/// it the first bytewise; NULL otherwise. Derived wherever it is needed,
+/// never stored, so it follows the source, the declaration and the provider
+/// as they are now. The SQL form of
+/// `broccoli_types::manifest::checker_language`, pinned to it by
+/// `migration::tests::the_checker_language_is_derived_by_the_one_rule`: an
+/// equality, never a pattern, so a declared `_` or `%` is plain text, and
+/// only ASCII folds, as `eq_ignore_ascii_case` does. Both inputs are bound
+/// first, in `input`, so the aliases inside (the provider's `p` among them)
+/// never shadow what they name.
 pub(crate) fn checker_language_sql(problem_id: &str, checker_format: &str) -> String {
+    let fold = |text: &str| {
+        format!("translate({text}, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')")
+    };
     format!(
         "(SELECT l->>'language' \
             FROM (SELECT ({problem_id})::text AS problem, {checker_format} AS format) input \
@@ -364,9 +371,11 @@ pub(crate) fn checker_language_sql(problem_id: &str, checker_format: &str) -> St
                      THEN pc.config->'files' ELSE '[]'::jsonb END) \
               WITH ORDINALITY AS f(file, n) \
            WHERE l->>'format' = input.format \
-             AND lower(f.file->>'filename') LIKE '%.' || lower(l->>'extension') \
-           ORDER BY f.n LIMIT 1)",
+             AND {file_extension} = {declared_extension} \
+           ORDER BY f.n, (l->>'language') COLLATE \"C\" LIMIT 1)",
         checker = provider(Provided::CheckerFormat, "input.format"),
+        file_extension = fold("substring(f.file->>'filename' from '\\.([^.]*)$')"),
+        declared_extension = fold("ltrim(l->>'extension', '.')"),
     )
 }
 
