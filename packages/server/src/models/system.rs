@@ -117,22 +117,28 @@ pub struct SystemOverviewResponse {
     /// DLQ messages with `resolved = false`.
     #[schema(example = 0)]
     pub dlq_unresolved_count: u64,
-    /// Each server with a fresh heartbeat, by id: whether it is ready
-    /// (`GET /readyz`) and the plugins it lacks while another serves them,
-    /// as each last reported.
+    /// Each live server, by id: whether it is ready (`GET /readyz`) and the
+    /// plugins it lacks while another serves them, as each last reported.
     pub servers: Vec<ServerReadiness>,
+    /// Whether the servers serve different enabled plugins in their
+    /// published versions, once each has applied the newest publish: a
+    /// misconfigured fleet, since a browser pinned to one server loses what
+    /// it lacks.
+    pub servers_mixed: bool,
 }
 
 /// One server's readiness, with the reason `GET /readyz` leaves out.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ServerReadiness {
     pub server_id: String,
-    /// Whether it passes `GET /readyz`: no other server serves every
-    /// enabled plugin it serves and more.
+    /// Whether it passes `GET /readyz`: it lacks no enabled plugin another
+    /// server serves, or, in a fleet where every server lacks one, it is
+    /// the one kept ready (the most plugins served, then the least id).
     pub ready: bool,
-    /// The enabled plugins it does not serve while another server does,
-    /// sorted. Not empty while it is not ready; it can be non-empty on a
-    /// ready server that serves a plugin the others lack.
+    /// The enabled plugins it does not serve in their published version
+    /// while another server does, sorted, leaving out those whose newest
+    /// publish it is still applying. Not empty while it is not ready; it can
+    /// be non-empty on the server a mixed fleet keeps ready.
     pub missing: Vec<String>,
 }
 

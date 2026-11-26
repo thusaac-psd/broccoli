@@ -9,6 +9,7 @@ pub mod dlq;
 pub mod entity;
 pub mod error;
 pub mod extractors;
+pub mod fleet_decision;
 pub mod handlers;
 pub mod hooks;
 pub mod host_funcs;

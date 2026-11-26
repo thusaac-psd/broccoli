@@ -85,12 +85,22 @@ pub struct PluginLifecycle {
     /// last reconcile (`plugin_replica.plugins`); `None` before the first
     /// read.
     fleet_serving: RwLock<Option<std::collections::BTreeSet<String>>>,
-    /// The plugins each other live replica with a fresh heartbeat serves,
-    /// as of the last reconcile (its `plugin_replica.plugins`), for
-    /// [`Self::ready`] and [`Self::missing_here`].
-    fleet_peers: RwLock<Vec<std::collections::BTreeSet<String>>>,
+    /// This replica's server id and each other live replica's id and latest
+    /// report, as of the last reconcile, for the fleet decision
+    /// ([`Self::decision`]).
+    fleet_peers: RwLock<Option<FleetPeers>>,
+    /// The generation each plugin was last published at, as of the last
+    /// reconcile (`plugin.generation`).
+    generations: RwLock<HashMap<String, i64>>,
     /// Set by [`stop`] at shutdown: no further report writes.
     stopped: std::sync::atomic::AtomicBool,
+}
+
+/// This replica's id and its live peers' reports ([`PluginLifecycle::decision`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FleetPeers {
+    pub server_id: String,
+    pub peers: Vec<(String, ReplicaReport)>,
 }
 
 struct Reported {
@@ -498,11 +508,18 @@ impl PluginLifecycle {
         }
     }
 
-    /// Records the plugins each other live replica with a fresh heartbeat
-    /// serves (see [`Self::ready`]).
-    pub(crate) fn set_fleet_peers(&self, peers: Vec<std::collections::BTreeSet<String>>) {
+    /// Records this replica's id and each other live replica's latest report
+    /// (see [`Self::decision`]).
+    pub(crate) fn set_fleet_peers(&self, peers: FleetPeers) {
         if let Ok(mut slot) = self.fleet_peers.write() {
-            *slot = peers;
+            *slot = Some(peers);
+        }
+    }
+
+    /// Records the generation each plugin was last published at.
+    pub(crate) fn set_generation(&self, plugin_id: &str, generation: i64) {
+        if let Ok(mut map) = self.generations.write() {
+            map.insert(plugin_id.to_string(), generation);
         }
     }
 
@@ -513,73 +530,127 @@ impl PluginLifecycle {
         reported.as_ref().map(|r| plugin_fleet::serving(&r.report))
     }
 
-    /// The enabled plugins a replica serving `here` lacks while one of
-    /// `peers` (what other replicas serve) serves them, sorted: the one
-    /// "missing here while a peer serves it" rule. Readiness
-    /// ([`Self::ready_among`]), admission ([`Self::missing_here`]) and the
-    /// admin overview's per-server reason all read it, and every kind of plugin counts alike (a contest type,
-    /// a language, an evaluator, a checker, a route), since a browser pinned
-    /// to a replica loses whatever that replica lacks.
-    pub fn missing_here_served_by_peer<'a>(
-        &self,
-        here: &std::collections::BTreeSet<String>,
-        peers: impl IntoIterator<Item = &'a std::collections::BTreeSet<String>>,
-    ) -> std::collections::BTreeSet<String> {
-        peers
+    /// Each enabled plugin with the generation it was last published at.
+    pub fn enabled_generations(&self) -> std::collections::BTreeMap<String, i64> {
+        let generations = self
+            .generations
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        self.desired_enabled_ids()
             .into_iter()
-            .flatten()
-            .filter(|id| !here.contains(*id) && self.is_desired_enabled(id))
-            .cloned()
+            .map(|id| {
+                let generation = generations.get(&id).copied().unwrap_or(0);
+                (id, generation)
+            })
             .collect()
     }
 
-    /// Whether a replica serving `here` should take browsers while `peers`
-    /// serve what they do: no peer serves every enabled plugin it serves
-    /// and more ([`Self::missing_here_served_by_peer`] both ways). A peer
-    /// that does takes every request this replica takes and more, so a
-    /// gateway that health-checks readiness re-pins this replica's browsers
-    /// there instead of leaving them without a plugin. The order is partial,
-    /// so some replica is always ready: replicas that each lack a different
-    /// plugin, or a plugin no replica has loaded, are all ready, and a
-    /// plugin failing everywhere never takes the fleet out of rotation.
-    pub fn ready_among(
-        &self,
-        here: &std::collections::BTreeSet<String>,
-        peers: &[std::collections::BTreeSet<String>],
-    ) -> bool {
-        !peers.iter().any(|peer| {
-            !self.missing_here_served_by_peer(here, [peer]).is_empty()
-                && self.missing_here_served_by_peer(peer, [here]).is_empty()
-        })
+    /// The fleet decision (`crate::fleet_decision`) over this replica's
+    /// latest report and its live peers' reports as of the last reconcile:
+    /// the one decision readiness ([`Self::ready`]), admission
+    /// ([`Self::outage`]) and the admin overview read. `None` before this
+    /// replica's first report or the first read of the fleet.
+    pub fn decision(&self) -> Option<crate::fleet_decision::Decision> {
+        use crate::fleet_decision::{Decision, Replica};
+        let here = self.reported.lock().ok()?.as_ref()?.report.clone();
+        let fleet = self.fleet_peers.read().ok()?.clone()?;
+        let mut replicas = vec![Replica {
+            server_id: &fleet.server_id,
+            report: &here,
+        }];
+        replicas.extend(
+            fleet
+                .peers
+                .iter()
+                .map(|(server_id, report)| Replica { server_id, report }),
+        );
+        Some(Decision::of(&self.enabled_generations(), &replicas))
     }
 
-    /// Whether this replica should take browsers ([`Self::ready_among`]),
-    /// by its latest report against the peers with a fresh heartbeat
-    /// (`plugin_fleet::PEER_FRESH_SECS`) as of the last reconcile. Ready
-    /// before its first report.
+    /// Whether this replica should take browsers, by the fleet decision.
+    /// Ready before its first report or the first read of the fleet.
     pub fn ready(&self) -> bool {
-        let Some(here) = self.serving_here() else {
+        let Some(decision) = self.decision() else {
             return true;
         };
-        let Ok(peers) = self.fleet_peers.read() else {
+        let Ok(fleet) = self.fleet_peers.read() else {
             return true;
         };
-        self.ready_among(&here, &peers)
+        fleet
+            .as_ref()
+            .and_then(|f| decision.get(&f.server_id))
+            .is_none_or(|here| here.ready)
     }
 
-    /// The enabled plugins this replica lacks while a peer with a fresh
-    /// heartbeat serves them ([`Self::missing_here_served_by_peer`]), by its
-    /// latest report (serving nothing before its first) against the peers of
-    /// the last reconcile. Admission ([`Self::outage`]) reads it as readiness
-    /// does, over the same peers, so a request is refused by name exactly
-    /// while a peer that can take it is one the gateway can send it to, and
-    /// a peer whose heartbeat went stale refuses nothing here.
+    /// The enabled plugins this replica lacks, settled, while another live
+    /// replica serves them in their published version, by the fleet
+    /// decision; empty before it is made.
     pub fn missing_here(&self) -> std::collections::BTreeSet<String> {
-        let here = self.serving_here().unwrap_or_default();
-        let Ok(peers) = self.fleet_peers.read() else {
-            return Default::default();
+        let here = self.fleet_peers.read().ok().and_then(|f| f.clone());
+        match (self.decision(), here) {
+            (Some(decision), Some(fleet)) => decision
+                .get(&fleet.server_id)
+                .map(|r| r.missing.clone())
+                .unwrap_or_default(),
+            _ => Default::default(),
+        }
+    }
+
+    /// Whether a ready replica other than this one serves `plugin_id` in its
+    /// published version, by the fleet decision: the gateway can send a
+    /// request this replica cannot serve to it.
+    fn served_by_ready_peer(&self, plugin_id: &str) -> bool {
+        let here = self.fleet_peers.read().ok().and_then(|f| f.clone());
+        match (self.decision(), here) {
+            (Some(decision), Some(fleet)) => {
+                decision.served_by_ready_peer(&fleet.server_id, plugin_id)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this replica is still applying `plugin_id`'s newest publish,
+    /// by its latest report.
+    fn settling_here(&self, plugin_id: &str) -> bool {
+        let generation = self
+            .generations
+            .read()
+            .ok()
+            .and_then(|g| g.get(plugin_id).copied())
+            .unwrap_or(0);
+        let Ok(reported) = self.reported.lock() else {
+            return true;
         };
-        self.missing_here_served_by_peer(&here, peers.iter())
+        match reported.as_ref().map(|r| r.report.get(plugin_id)) {
+            None | Some(None) => true,
+            Some(Some(state)) => {
+                state.generation < generation || state.status == ReplicaPluginStatus::Unloaded
+            }
+        }
+    }
+
+    /// How this replica serves `plugin_id`, by the one decision: in its
+    /// published version, in an outdated or mismatched copy, or not, and
+    /// then why ([`Self::outage`]). Every path that needs a plugin here (a
+    /// route, a config write, a submit) answers by it.
+    pub fn served_here(&self, plugin_id: &str) -> ServedHere {
+        let status = self
+            .reported
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref()?.report.get(plugin_id).map(|s| s.status));
+        match status {
+            Some(ReplicaPluginStatus::Loaded) if self.is_desired_enabled(plugin_id) => {
+                ServedHere::Published
+            }
+            Some(ReplicaPluginStatus::Outdated | ReplicaPluginStatus::Mismatched)
+                if self.is_desired_enabled(plugin_id) =>
+            {
+                ServedHere::Outdated
+            }
+            _ => ServedHere::Out(self.outage(plugin_id)),
+        }
     }
 
     /// What closes new work on a problem whose `needs` name no language yet
@@ -753,23 +824,28 @@ impl PluginLifecycle {
     // SQL over the rows they read (`plugin.is_enabled`, `plugin.governs`);
     // change them together.
 
-    /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
-    /// the fleet disabled it, it is enabled and loaded on no live replica
-    /// ([`Self::loaded_nowhere`]), it is enabled and another live replica
-    /// serves it ([`Self::missing_here`]), or it is enabled and missing on
-    /// this replica for now (loading). This is the one place the four are
-    /// told apart, so every answer about a plugin that is out
-    /// (`AppError::from`) names the plugin unless a retry here may serve.
+    /// Why plugin `plugin_id`, known not to be loaded here, cannot serve,
+    /// by the one fleet decision ([`Self::decision`]): the fleet disabled it;
+    /// it is enabled and a ready replica serves its published version, to
+    /// which the gateway sends the retry (`NotLoadedHere`); this replica is
+    /// still applying its newest publish, or the fleet is not read yet, so a
+    /// retry here may serve (`Unavailable`); or no ready replica serves it,
+    /// which is the fleet's state, not this replica's (`NotLoaded`). This is
+    /// the one place they are told apart, so every answer about a plugin
+    /// that is out (`AppError::from`) names the plugin unless a retry here
+    /// may serve.
     pub fn outage(&self, plugin_id: &str) -> PluginOutage {
         let plugin_id = plugin_id.to_string();
         if !self.is_desired_enabled(&plugin_id) {
             PluginOutage::Disabled { plugin_id }
         } else if self.loaded_nowhere(&plugin_id) {
             PluginOutage::NotLoaded { plugin_id }
-        } else if self.missing_here().contains(&plugin_id) {
+        } else if self.served_by_ready_peer(&plugin_id) {
             PluginOutage::NotLoadedHere { plugin_id }
-        } else {
+        } else if self.settling_here(&plugin_id) || self.decision().is_none() {
             PluginOutage::Unavailable
+        } else {
+            PluginOutage::NotLoaded { plugin_id }
         }
     }
 
@@ -887,6 +963,19 @@ impl PluginLifecycle {
     }
 }
 
+/// How this replica serves one plugin ([`PluginLifecycle::served_here`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServedHere {
+    /// In the version the fleet published.
+    Published,
+    /// In an outdated or mismatched copy: it runs, but is not the plugin the
+    /// fleet published, so what changes the plugin (a config write) is
+    /// refused here.
+    Outdated,
+    /// Not at all, and why.
+    Out(PluginOutage),
+}
+
 /// Why contests of `contest_type` cannot be served on this replica, if they
 /// cannot: the type is closed fleet-wide ([`PluginLifecycle::key_closure`]:
 /// every provider disabled, or its provider loaded on no live replica), or
@@ -926,9 +1015,12 @@ pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option
 /// loaded on no live replica (`PLUGIN_NOT_LOADED`), each naming the plugin
 /// and retried by the client. Otherwise the handler is the contest type's
 /// fleet-wide provider (`providers::resolve`), the plugin that admits the
-/// work through its `before_submission` hook; a replica that does not have
-/// it loaded is briefly unavailable (`CONTEST_TYPE_UNAVAILABLE`, retry
-/// later), and never admits the work through another provider.
+/// work through its `before_submission` hook. A replica that does not have
+/// it loaded answers by the fleet decision ([`PluginLifecycle::outage`]):
+/// `PLUGIN_NOT_LOADED_HERE` while a ready replica serves it, the fleet's
+/// `PLUGIN_NOT_LOADED` while none does, and `CONTEST_TYPE_UNAVAILABLE` only
+/// while this replica is still loading it; it never admits the work through
+/// another provider.
 pub async fn accepting_handler(
     state: &AppState,
     needs: Needs<'_>,
@@ -967,14 +1059,16 @@ pub async fn accepting_handler(
         contest_type,
     )
     .map_err(|unresolved| {
-        // Its provider is not loaded here: by name while another replica
-        // serves it, else briefly unavailable while this one loads it.
+        // Its provider is not loaded here: by name, by the one decision,
+        // unless this replica is loading it, when a retry here may serve.
         match unresolved
             .provider
             .map(|plugin_id| state.plugin_lifecycle.outage(&plugin_id))
         {
-            Some(outage @ PluginOutage::NotLoadedHere { .. }) => outage.into(),
-            _ => AppError::ContestTypeUnavailable(contest_type.to_string()),
+            Some(PluginOutage::Unavailable) | None => {
+                AppError::ContestTypeUnavailable(contest_type.to_string())
+            }
+            Some(outage) => outage.into(),
         }
     })
 }
@@ -1299,6 +1393,9 @@ async fn reconcile_locked(
         // plugin is still loading here, the visibility kernel must already
         // treat it as enabled-but-not-loaded (fail closed), not as disabled.
         state.plugin_lifecycle.set_desired(&row.id, row.is_enabled);
+        state
+            .plugin_lifecycle
+            .set_generation(&row.id, row.generation);
         let Some(id) = row_id(&row) else { continue };
         if let Err(error) = apply(state, applied, &id, desired, now).await {
             failures.push(PluginActivationFailure {
@@ -1329,13 +1426,15 @@ async fn reconcile_locked(
     }
     state.plugin_lifecycle.set_fleet_loaded(live.provides);
     state.plugin_lifecycle.set_fleet_serving(live.serving);
-    state.plugin_lifecycle.set_fleet_peers(
-        live.replicas
+    state.plugin_lifecycle.set_fleet_peers(FleetPeers {
+        server_id: state.config.server.id.clone(),
+        peers: live
+            .replicas
             .into_iter()
-            .filter(|r| r.fresh && r.server_id != state.config.server.id)
-            .map(|r| r.serving)
+            .filter(|r| r.server_id != state.config.server.id)
+            .map(|r| (r.server_id, r.report))
             .collect(),
-    );
+    });
     Ok(failures)
 }
 
@@ -2848,59 +2947,134 @@ mod tests {
         lifecycle
     }
 
-    /// A replica is ready unless a live peer serves every contest type it
-    /// serves on its fleet-wide provider and more: then a gateway sends its
-    /// browsers to a replica that takes their submissions. Replicas that
-    /// each lack a different type, and a type no replica has loaded, leave
-    /// every replica ready, so the gateways always keep one.
-    /// Readiness counts every enabled plugin a peer serves, of any kind
-    /// (a route-only plugin provides no key at all), and a replica is
-    /// unready only while some peer serves strictly more of them.
-    #[test]
-    fn a_replica_is_unready_only_while_a_peer_serves_strictly_more_plugins() {
-        let set = |ids: &[&str]| -> std::collections::BTreeSet<String> {
-            ids.iter().map(|id| id.to_string()).collect()
-        };
-        let state = |status| ReplicaPluginState {
+    fn state(status: ReplicaPluginStatus) -> ReplicaPluginState {
+        ReplicaPluginState {
             status,
             error: None,
             generation: 1,
             retry_in_ms: None,
             version: None,
-        };
+        }
+    }
+
+    /// This replica's readiness and admission read one decision: lacking a
+    /// plugin a ready peer serves, it is not ready and refuses that plugin
+    /// as missing here; lacking one only an unready peer serves, it answers
+    /// the fleet's state, since the gateway cannot send the request there.
+    #[test]
+    fn readiness_and_admission_read_one_decision() {
         let lifecycle = PluginLifecycle::reporting(
             [
-                ("judge".to_string(), state(ReplicaPluginStatus::Loaded)),
-                ("routes".to_string(), state(ReplicaPluginStatus::Failed)),
+                ("a".to_string(), state(ReplicaPluginStatus::Loaded)),
+                ("b".to_string(), state(ReplicaPluginStatus::NotInstalled)),
             ]
             .into(),
         );
-        for (plugin, enabled) in [("judge", true), ("routes", true), ("old", false)] {
-            lifecycle.set_desired(plugin, enabled);
+        for plugin in ["a", "b"] {
+            lifecycle.set_desired(plugin, true);
+            lifecycle.set_generation(plugin, 1);
         }
-        let here = set(&["judge"]);
-        assert_eq!(lifecycle.serving_here(), Some(here.clone()));
+        assert!(lifecycle.ready(), "no fleet read yet");
+        assert_eq!(lifecycle.outage("b"), PluginOutage::Unavailable);
 
-        assert!(lifecycle.ready(), "no peer known yet");
-        lifecycle.set_fleet_peers(vec![set(&["judge", "routes"])]);
+        // A peer serves both: it is ready, and this replica sends b there.
+        let peer = |id: &str, entries: &[(&str, ReplicaPluginStatus)]| {
+            (
+                id.to_string(),
+                entries
+                    .iter()
+                    .map(|(p, s)| (p.to_string(), state(*s)))
+                    .collect::<ReplicaReport>(),
+            )
+        };
+        lifecycle.set_fleet_peers(FleetPeers {
+            server_id: "here".into(),
+            peers: vec![peer(
+                "there",
+                &[
+                    ("a", ReplicaPluginStatus::Loaded),
+                    ("b", ReplicaPluginStatus::Loaded),
+                ],
+            )],
+        });
+        assert!(!lifecycle.ready());
+        assert_eq!(lifecycle.missing_here(), ["b".to_string()].into());
         assert_eq!(
-            lifecycle
-                .missing_here_served_by_peer(&here, &lifecycle.fleet_peers.read().unwrap()[..]),
-            set(&["routes"])
+            lifecycle.outage("b"),
+            PluginOutage::NotLoadedHere {
+                plugin_id: "b".into()
+            }
         );
-        assert!(!lifecycle.ready(), "a peer serves the route plugin as well");
-        assert!(lifecycle.ready_among(&set(&["judge", "routes"]), std::slice::from_ref(&here)));
 
-        // A disabled plugin a peer still serves counts for nothing.
-        lifecycle.set_fleet_peers(vec![set(&["judge", "old"])]);
+        // A peer serves only b: each lacks the other's, and the tie-break
+        // keeps "here" ("here" < "there") ready, so b is refused as the
+        // fleet's state, not as routed elsewhere.
+        lifecycle.set_fleet_peers(FleetPeers {
+            server_id: "here".into(),
+            peers: vec![peer(
+                "there",
+                &[
+                    ("a", ReplicaPluginStatus::NotInstalled),
+                    ("b", ReplicaPluginStatus::Loaded),
+                ],
+            )],
+        });
         assert!(lifecycle.ready());
-        // Each lacks what the other has: neither serves more.
-        lifecycle.set_fleet_peers(vec![set(&["routes"])]);
+        assert_eq!(
+            lifecycle.outage("b"),
+            PluginOutage::NotLoaded {
+                plugin_id: "b".into()
+            }
+        );
+        assert!(lifecycle.decision().unwrap().mixed());
+
+        // A disabled plugin counts for nothing.
+        lifecycle.set_desired("b", false);
         assert!(lifecycle.ready());
-        assert!(lifecycle.ready_among(&set(&["routes"]), std::slice::from_ref(&here)));
-        // A plugin no replica serves leaves every replica ready.
-        lifecycle.set_fleet_peers(vec![here.clone()]);
-        assert!(lifecycle.ready());
+        assert!(lifecycle.missing_here().is_empty());
+        assert_eq!(
+            lifecycle.outage("b"),
+            PluginOutage::Disabled {
+                plugin_id: "b".into()
+            }
+        );
+    }
+
+    /// How this replica serves a plugin, for every path that needs one: its
+    /// published version, an outdated copy, or why not.
+    #[test]
+    fn a_plugin_is_served_here_published_outdated_or_out() {
+        let lifecycle = PluginLifecycle::reporting(
+            [
+                ("p".to_string(), state(ReplicaPluginStatus::Loaded)),
+                ("q".to_string(), state(ReplicaPluginStatus::Outdated)),
+                ("r".to_string(), state(ReplicaPluginStatus::Failed)),
+            ]
+            .into(),
+        );
+        for plugin in ["p", "q", "r"] {
+            lifecycle.set_desired(plugin, true);
+            lifecycle.set_generation(plugin, 1);
+        }
+        lifecycle.set_fleet_peers(FleetPeers {
+            server_id: "here".into(),
+            peers: vec![],
+        });
+        assert_eq!(lifecycle.served_here("p"), ServedHere::Published);
+        assert_eq!(lifecycle.served_here("q"), ServedHere::Outdated);
+        assert_eq!(
+            lifecycle.served_here("r"),
+            ServedHere::Out(PluginOutage::NotLoaded {
+                plugin_id: "r".into()
+            })
+        );
+        lifecycle.set_desired("p", false);
+        assert_eq!(
+            lifecycle.served_here("p"),
+            ServedHere::Out(PluginOutage::Disabled {
+                plugin_id: "p".into()
+            })
+        );
     }
 
     /// A problem's submit is closed for each language whose providers are
@@ -2976,52 +3150,6 @@ mod tests {
                 reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
         );
-    }
-
-    /// A plugin another live replica serves and this one lacks is out here
-    /// by name, the one rule admission and readiness read: only while it
-    /// is enabled, a peer serves it, and it is not loaded here.
-    #[test]
-    fn a_plugin_a_peer_serves_and_this_replica_lacks_is_missing_here_by_name() {
-        let lifecycle = PluginLifecycle::default();
-        lifecycle.set_desired("p", true);
-        lifecycle.set_fleet_serving(["p".to_string()].into());
-        assert_eq!(
-            lifecycle.outage("p"),
-            PluginOutage::Unavailable,
-            "loading here"
-        );
-        lifecycle.set_fleet_peers(vec![["p".to_string()].into()]);
-        assert!(lifecycle.missing_here().contains("p"));
-        assert_eq!(
-            lifecycle.outage("p"),
-            PluginOutage::NotLoadedHere {
-                plugin_id: "p".into()
-            }
-        );
-        lifecycle.set_desired("p", false);
-        assert!(
-            lifecycle.missing_here().is_empty(),
-            "disabled is nobody's to load"
-        );
-
-        // A replica that serves the plugin itself lacks nothing.
-        let loaded = PluginLifecycle::reporting(
-            [(
-                "p".to_string(),
-                ReplicaPluginState {
-                    status: ReplicaPluginStatus::Loaded,
-                    error: None,
-                    generation: 1,
-                    retry_in_ms: None,
-                    version: None,
-                },
-            )]
-            .into(),
-        );
-        loaded.set_desired("p", true);
-        loaded.set_fleet_peers(vec![["p".to_string()].into()]);
-        assert!(loaded.missing_here().is_empty(), "loaded here");
     }
 
     /// A plugin is out as loaded nowhere only while no live replica serves

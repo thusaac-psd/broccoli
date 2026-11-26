@@ -173,7 +173,10 @@ export default function AdminSystemPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <ServerReadinessList servers={data.servers} />
+                <ServerReadinessList
+                  servers={data.servers}
+                  mixed={data.servers_mixed}
+                />
               </CardContent>
             </Card>
           </div>

@@ -27,20 +27,19 @@ use crate::entity::plugin as plugin_entity;
 use crate::entity::plugin_replica;
 use crate::plugin_distribution::{PluginSource, PluginSourceKind};
 
-/// A replica's row counts as live while it was touched within this window.
-/// Replicas touch it every [`HEARTBEAT_INTERVAL`], so a live one is never
-/// missed and a dead one disappears within a minute.
-pub const LIVE_WINDOW_SECS: i64 = 60;
-
 /// How often a replica touches its row's heartbeat.
-pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// A replica counts as a peer for readiness (`PluginLifecycle::ready`) only
-/// while its heartbeat is this fresh: two intervals, so one late touch never
-/// drops a running peer, while a server that died, or stopped without
-/// retiring its row, stops counting within half a minute instead of
-/// holding its peers out of rotation for the whole [`LIVE_WINDOW_SECS`].
-pub const PEER_FRESH_SECS: i64 = 2 * HEARTBEAT_INTERVAL.as_secs() as i64;
+/// A replica's row counts as live while it was touched within this window,
+/// the one window for every question of who serves what: readiness,
+/// admission, the admin overview, and which replicas can take judging work.
+/// Three heartbeats, so one late touch never drops a running replica, and
+/// about as long as the shipped gateways take to stop sending browsers to a
+/// server whose readiness fails (two failed probes five seconds apart): a
+/// replica that died stops counting about when the gateway stops sending it
+/// requests. A server counts by its heartbeat alone, so every server of the
+/// fleet runs behind the gateway.
+pub const LIVE_WINDOW_SECS: i64 = 3 * HEARTBEAT_INTERVAL.as_secs() as i64;
 
 /// One plugin's state on one replica.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -156,11 +155,11 @@ pub struct LiveReplicaLoaded {
     pub server_id: String,
     /// Its own reported `plugin_replica.provides`.
     pub provides: crate::providers::Loaded,
-    /// The plugins it serves ([`ReplicaPluginStatus::serves`]).
+    /// The plugins it serves in some version ([`ReplicaPluginStatus::serves`]).
     pub serving: std::collections::BTreeSet<String>,
-    /// Whether its heartbeat is within [`PEER_FRESH_SECS`]: only then does
-    /// it count as a peer, for readiness and admission alike.
-    pub fresh: bool,
+    /// Its latest report, which the fleet decision reads
+    /// (`crate::fleet_decision`).
+    pub report: ReplicaReport,
 }
 
 /// The plugins a report says its replica serves.
@@ -177,25 +176,18 @@ pub async fn live_loaded(db: &DatabaseConnection) -> Result<LiveLoaded, DbErr> {
     let rows = db
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT server_id, provides, plugins, \
-                    heartbeat_at > NOW() - make_interval(secs => $2) AS fresh \
-               FROM plugin_replica \
+            "SELECT server_id, provides, plugins FROM plugin_replica \
               WHERE heartbeat_at > NOW() - make_interval(secs => $1) \
               ORDER BY server_id",
-            [
-                (LIVE_WINDOW_SECS as f64).into(),
-                (PEER_FRESH_SECS as f64).into(),
-            ],
+            [(LIVE_WINDOW_SECS as f64).into()],
         ))
         .await?;
     let mut live = LiveLoaded::default();
     for row in rows {
         let server_id: String = row.try_get("", "server_id")?;
-        let fresh: bool = row.try_get("", "fresh")?;
         let unread = |e: serde_json::Error| tracing::warn!(server_id, error = %e, "A replica reported what it has loaded in a shape this build does not read");
         let mut replica = LiveReplicaLoaded {
             server_id: server_id.clone(),
-            fresh,
             ..LiveReplicaLoaded::default()
         };
         let provides: Option<serde_json::Value> = row.try_get("", "provides")?;
@@ -213,6 +205,7 @@ pub async fn live_loaded(db: &DatabaseConnection) -> Result<LiveLoaded, DbErr> {
             Ok(report) => {
                 replica.serving = serving(&report);
                 live.serving.extend(replica.serving.iter().cloned());
+                replica.report = report;
             }
             Err(e) => unread(e),
         }

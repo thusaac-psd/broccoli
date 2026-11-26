@@ -133,7 +133,7 @@ pub async fn system_overview(
     } = workers;
 
     let backlog = read_backlog(&state.db).await?;
-    let servers = read_server_readiness(&state).await?;
+    let (servers, servers_mixed) = read_server_readiness(&state).await?;
 
     Ok(Json(SystemOverviewResponse {
         queue_state,
@@ -146,41 +146,39 @@ pub async fn system_overview(
         submissions_parked: count(backlog.parked),
         dlq_unresolved_count: count(backlog.dlq_unresolved),
         servers,
+        servers_mixed,
     }))
 }
 
-/// Each server with a fresh heartbeat, by the readiness rule `/readyz`
-/// applies (`PluginLifecycle::ready_among`), each against the others, with
-/// the plugins it lacks while another serves them
-/// (`PluginLifecycle::missing_here_served_by_peer`).
-async fn read_server_readiness(state: &AppState) -> Result<Vec<ServerReadiness>, sea_orm::DbErr> {
-    let replicas: Vec<_> = crate::plugin_fleet::live_loaded(&state.db)
-        .await?
+/// Each live server, by the one fleet decision `/readyz` and admission read
+/// (`crate::fleet_decision`), with the plugins it lacks while another serves
+/// them, and whether the servers serve different plugins (a misconfigured
+/// fleet).
+async fn read_server_readiness(
+    state: &AppState,
+) -> Result<(Vec<ServerReadiness>, bool), sea_orm::DbErr> {
+    use crate::fleet_decision::{Decision, Replica};
+    let replicas = crate::plugin_fleet::live_loaded(&state.db).await?.replicas;
+    let decision = Decision::of(
+        &state.plugin_lifecycle.enabled_generations(),
+        &replicas
+            .iter()
+            .map(|r| Replica {
+                server_id: &r.server_id,
+                report: &r.report,
+            })
+            .collect::<Vec<_>>(),
+    );
+    let servers = decision
         .replicas
-        .into_iter()
-        .filter(|r| r.fresh)
-        .collect();
-    let lifecycle = &state.plugin_lifecycle;
-    Ok(replicas
         .iter()
-        .enumerate()
-        .map(|(i, replica)| {
-            let peers: Vec<_> = replicas
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .map(|(_, peer)| peer.serving.clone())
-                .collect();
-            ServerReadiness {
-                server_id: replica.server_id.clone(),
-                ready: lifecycle.ready_among(&replica.serving, &peers),
-                missing: lifecycle
-                    .missing_here_served_by_peer(&replica.serving, &peers)
-                    .into_iter()
-                    .collect(),
-            }
+        .map(|replica| ServerReadiness {
+            server_id: replica.server_id.clone(),
+            ready: replica.ready,
+            missing: replica.missing.iter().cloned().collect(),
         })
-        .collect())
+        .collect();
+    Ok((servers, decision.mixed()))
 }
 
 /// A `COUNT(*)`, never negative.

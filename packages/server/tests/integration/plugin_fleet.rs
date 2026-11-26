@@ -1254,7 +1254,11 @@ async fn a_nested_plugin_call_is_admitted_while_shutdown_drains() {
 async fn the_heartbeat_touches_only_the_rows_liveness() {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
-    let a = TestApp::spawn().await;
+    let a = TestApp::spawn_with_options(SpawnOptions {
+        no_heartbeat: true,
+        ..Default::default()
+    })
+    .await;
     let id = a.state.config.server.id.clone();
     plugin_lifecycle::reconcile(&a.state).await.unwrap();
     a.db.execute_raw(Statement::from_sql_and_values(
@@ -1452,14 +1456,13 @@ async fn a_problem_whose_languages_are_all_disabled_names_the_language_plugin() 
     }
 }
 
-/// `/readyz` fails on a replica while a peer with a fresh heartbeat
-/// serves every enabled plugin it serves and more, whatever the plugin
-/// provides (here a route-only plugin, no key at all), so a gateway that
-/// health-checks it moves the browsers pinned there to a replica that has
-/// the plugin; `/livez` keeps answering. The public body names no plugin;
-/// the admin overview says, per server, what it lacks. A peer whose
-/// heartbeat went stale, though still inside the live window, no longer
-/// counts.
+/// `/readyz` fails on a replica while it lacks an enabled plugin a live
+/// peer serves, whatever the plugin provides (here a route-only plugin, no
+/// key at all), so a gateway that health-checks it moves the browsers pinned
+/// there to a replica that has the plugin; `/livez` keeps answering. The
+/// public body names no plugin; the admin overview says, per server, what it
+/// lacks, and that the fleet is misconfigured. A peer whose heartbeat went
+/// stale no longer counts.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replica_lacking_a_plugin_a_fresh_peer_serves_is_not_ready() {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
@@ -1516,6 +1519,11 @@ async fn a_replica_lacking_a_plugin_a_fresh_peer_serves_is_not_ready() {
     );
     assert_eq!(server("peer")["ready"], true, "{}", res.text);
     assert_eq!(server("peer")["missing"], json!([]), "{}", res.text);
+    assert_eq!(
+        res.body["servers_mixed"], true,
+        "a misconfigured fleet: {}",
+        res.text
+    );
 
     app.db
         .execute_raw(Statement::from_string(

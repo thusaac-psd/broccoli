@@ -127,6 +127,9 @@ pub struct E2eTestApp {
     pub client: Client,
     pub db: DatabaseConnection,
     server_handle: Option<JoinHandle<()>>,
+    /// The in-process server's replica heartbeat, which keeps its
+    /// `plugin_replica` row live as a running server's does.
+    replica_heartbeat: Option<JoinHandle<()>>,
     claim_cancel: Option<watch::Sender<bool>>,
     claim_handle: Option<JoinHandle<()>>,
     /// The in-process workers' consume loops, which stop once
@@ -162,6 +165,9 @@ pub struct E2eTestApp {
 impl Drop for E2eTestApp {
     fn drop(&mut self) {
         if let Some(h) = self.server_handle.take() {
+            h.abort();
+        }
+        if let Some(h) = self.replica_heartbeat.take() {
             h.abort();
         }
         if let Some(tx) = self.claim_cancel.take() {
@@ -551,6 +557,7 @@ impl E2eTestApp {
             client,
             db,
             server_handle: None,
+            replica_heartbeat: None,
             claim_cancel: None,
             claim_handle: None,
             worker_handles: Vec::new(),
@@ -892,6 +899,7 @@ impl E2eTestApp {
             );
         }
 
+        let replica_heartbeat = tokio::spawn(server::plugin_lifecycle::heartbeat(state.clone()));
         let app = server::build_router(state.clone()).expect("router");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -919,6 +927,7 @@ impl E2eTestApp {
                 .expect("Failed to build reqwest client"),
             db,
             server_handle: Some(server_handle),
+            replica_heartbeat: Some(replica_heartbeat),
             claim_cancel: claim_cancel_opt,
             claim_handle: claim_handle_opt,
             worker_handles,
