@@ -586,6 +586,71 @@ async fn peer_serving(app: &E2eTestApp, plugin_id: &str, contest_type: &str, lan
         .unwrap();
 }
 
+/// A public problem that belongs to a contest whose visibility plugin is out
+/// reads and takes practice submissions while the plugin is loaded nowhere,
+/// as while it is disabled: no server enforces it. While a peer serves it,
+/// that peer enforces it, so reading the problem here is refused by its name;
+/// a practice submission, judged under the problem's own default type, is
+/// still taken.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_practice_problem_in_a_contest_reads_unless_a_peer_enforces_its_plugin() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("blind_practice_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app
+        .create_public_problem(&admin, "In a contest of an out plugin")
+        .await;
+    app.create_test_case(problem_id, &admin).await;
+    let contest_id = app
+        .create_contest(&admin, "Out plugin's contest", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    record_plugin_elsewhere(&app, "blind-viz", true, "blind-type", "blind-lang").await;
+    app.db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE contest SET contest_type = 'blind-type' WHERE id = $1",
+            [contest_id.into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(app.reconcile_plugins_failing().await, ["blind-viz"]);
+    let contestant = app
+        .create_authenticated_user("blind_practice_user", "pass1234")
+        .await;
+    let problem = format!("/api/v1/problems/{problem_id}");
+    let submissions = format!("/api/v1/problems/{problem_id}/submissions");
+    let body = json!({
+        "language": "cpp",
+        "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+    });
+    let read = || app.get_with_token(&problem, &contestant);
+    let submit = || app.post_with_token(&submissions, &body, &contestant);
+
+    // Loaded nowhere: nobody enforces it.
+    let res = read().await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let res = submit().await;
+    assert!(res.status < 300, "{}", res.text);
+
+    // A peer serves it, and enforces it.
+    peer_serving(&app, "blind-viz", "blind-type", "blind-lang").await;
+    app.reconcile_plugins_failing().await;
+    let res = read().await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_NOT_LOADED_HERE", "{}", res.text);
+    assert_eq!(
+        res.body["details"]["plugin_id"], "blind-viz",
+        "{}",
+        res.text
+    );
+    let res = submit().await;
+    assert!(res.status < 300, "{}", res.text);
+}
+
 /// A plugin a live peer serves and this server lacks is refused by name
 /// wherever a request needs it: a submit under its contest type, its own
 /// routes. Each answer is a 503 naming it, retried once the gateway has

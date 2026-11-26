@@ -929,16 +929,17 @@ async fn a_contest_submission_without_a_local_handler_is_a_retryable_503() {
     );
 }
 
-/// What a missing visibility plugin governs includes resources reached
-/// outside its contests' routes: a problem that belongs to a governed
-/// contest is just as unavailable through the standalone problem route. A problem
-/// in no governed contest stays readable.
+/// What a visibility plugin a peer enforces and this replica lacks governs
+/// includes resources reached outside its contests' routes: a problem that
+/// belongs to a governed contest is just as unavailable through the
+/// standalone problem route. A problem in no governed contest stays readable.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_visibility_plugin_also_hides_its_contests_problems_outside_the_contest() {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
-    // No plugin loads anywhere here (so plain problems can be created); the
-    // fleet just has the plugin enabled, recorded as governing `fleet-only`.
+    // No plugin loads on these two (so plain problems can be created); the
+    // fleet has the plugin enabled, recorded as governing `fleet-only`, and a
+    // live peer serves it.
     let a = TestApp::spawn().await;
     let b_dir = tempfile::tempdir().unwrap();
     let b = a
@@ -970,6 +971,11 @@ async fn a_missing_visibility_plugin_also_hides_its_contests_problems_outside_th
              WHERE plugins::jsonb -> '{PLUGIN}' ->> 'status' = 'loaded'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
+        format!(
+            "INSERT INTO plugin_replica (server_id, plugins, provides, state_at, heartbeat_at) \
+             VALUES ('a-peer', '{{\"{PLUGIN}\": {{\"status\": \"loaded\", \"generation\": 1}}}}', \
+                     '{{\"contest_types\": {{\"fleet-only\": [\"{PLUGIN}\"]}}}}', NOW(), NOW())"
+        ),
     ] {
         a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
             .await
