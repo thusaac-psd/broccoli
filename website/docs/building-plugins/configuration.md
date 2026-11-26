@@ -95,8 +95,8 @@ secret = true
 The JSON schema marks the field `writeOnly` and the array `x-key`. No read
 route sends a secret's value. The admin config routes answer a set secret as
 its ref, `{"$secret": "<ref>"}` (the API schema's `KeptSecret`): an opaque id
-the server mints each time it stores a new value, and keeps while the value
-stays. Every set secret has one: a value stored before its field was secret
+the server mints each time a write sends a value for the secret, and keeps
+while writes send the ref back. Every set secret has one: a value stored before its field was secret
 gets its ref when the plugin that marks it secret loads. The cascade answers
 the field as `null`.
 
@@ -106,8 +106,8 @@ never the same position). Saving the config back as read keeps every
 station's token whatever stations were added, removed or moved. Anything else
 is the writer's own:
 
-- A string sets the secret. Sending the stored value again keeps its ref; any
-  other value gets a new one.
+- A string sets the secret, with a new ref whatever its value, so a ref never
+  says whether a value sent is the stored one.
 - `{"$clear": true}` (the API schema's `ClearSecret`) clears it, so the field
   reads unset.
 - No secret (`null`, the empty string, or the field left out) where one is
