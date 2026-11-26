@@ -615,6 +615,7 @@ impl IntoResponse for AppError {
 
         let plugin_caused = matches!(self, AppError::PluginFailed(_));
         let (status, body) = self.status_and_body();
+        let designed = HostCode::of(&body.code).is_some_and(HostCode::is_retryable);
 
         let mut response = if let Some(seconds) = retry_after {
             (status, [("Retry-After", seconds.to_string())], Json(body)).into_response()
@@ -624,9 +625,19 @@ impl IntoResponse for AppError {
         if plugin_caused {
             response.extensions_mut().insert(PluginCaused);
         }
+        if designed {
+            response.extensions_mut().insert(DesignedState);
+        }
         response
     }
 }
+
+/// Marks a response that answers a state the platform is designed to be in
+/// for a while ([`HostCode::is_retryable`], or a replica's readiness probe
+/// while it is not ready): retried after `Retry-After`, never the host
+/// failing.
+#[derive(Debug, Clone, Copy)]
+pub struct DesignedState;
 
 /// Marks a response a plugin's failure caused ([`AppError::PluginFailed`]),
 /// which its own line about the plugin already logged.
@@ -636,9 +647,19 @@ pub struct PluginCaused;
 /// Whether `response` is a server error the host logs as its own: every 5xx
 /// but one a plugin caused, so a plugin's failures (a route answering 500 a
 /// contestant can call at will) log only under that plugin's budget, at
-/// most as a warning.
+/// most as a warning, and one that answers a designed state
+/// ([`DesignedState`]), which a gateway probing readiness or a client
+/// retrying an outage asks for over and over.
 pub fn is_host_failure<B>(response: &axum::http::Response<B>) -> bool {
-    response.status().is_server_error() && response.extensions().get::<PluginCaused>().is_none()
+    let extensions = response.extensions();
+    response.status().is_server_error()
+        && extensions.get::<PluginCaused>().is_none()
+        && extensions.get::<DesignedState>().is_none()
+}
+
+/// Whether `response` answers a designed state ([`DesignedState`]).
+pub fn is_designed_state<B>(response: &axum::http::Response<B>) -> bool {
+    response.extensions().get::<DesignedState>().is_some()
 }
 
 impl From<DbErr> for AppError {
@@ -831,6 +852,49 @@ impl From<TypedMultipartError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every designed state (a code marked `retryable`) is answered with
+    /// `Retry-After` and is never logged as the host failing; an internal
+    /// error is.
+    #[tokio::test]
+    async fn every_retryable_code_answers_a_designed_state_not_a_failure() {
+        let answers = [
+            AppError::RateLimited { retry_after: 3 },
+            AppError::Overloaded { retry_after: 3 },
+            AppError::ContestTypeUnavailable("icpc".into()),
+            AppError::ContestTypeDisabled {
+                contest_type: "icpc".into(),
+                plugin_id: "ioi".into(),
+            },
+            AppError::PluginUnavailable,
+            AppError::PluginDisabled("ioi".into()),
+            AppError::PluginNotLoaded("ioi".into()),
+            AppError::PluginNotLoadedHere("ioi".into()),
+            AppError::PluginOutdatedHere("ioi".into()),
+            AppError::StorageUnavailable,
+            AppError::DatabaseUnavailable,
+            AppError::DatabaseBusy,
+            AppError::QueueUnavailable,
+        ];
+        let mut answered = std::collections::BTreeSet::new();
+        for answer in answers {
+            let response = answer.into_response();
+            assert!(response.headers().contains_key("Retry-After"));
+            assert!(!is_host_failure(&response));
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            answered.insert(body["code"].as_str().unwrap().to_string());
+        }
+        let retryable: std::collections::BTreeSet<String> = HostCode::ALL
+            .iter()
+            .filter(|code| code.is_retryable())
+            .map(|code| code.as_str().to_string())
+            .collect();
+        assert_eq!(answered, retryable, "every retryable code is answered here");
+        assert!(is_host_failure(
+            &AppError::Internal("x".into()).into_response()
+        ));
+    }
 
     /// A plugin's failure is a 500 the host does not log as its own: the
     /// plugin's line about it is the only one, under the plugin's budget.

@@ -245,11 +245,18 @@ pub async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             StatusCode::OK,
             Json(serde_json::json!({ "status": "ready" })),
         )
+            .into_response()
     } else {
-        (
+        // Not ready is the state a gateway probes for, not a failure.
+        let mut response = (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "status": "not_ready" })),
         )
+            .into_response();
+        response
+            .extensions_mut()
+            .insert(crate::error::DesignedState);
+        response
     }
 }
 

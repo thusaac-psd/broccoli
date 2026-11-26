@@ -536,6 +536,11 @@ pub fn build_router(state: AppState) -> anyhow::Result<axum::Router> {
                                 latency_ms = latency.as_millis() as u64,
                                 "response failed"
                             );
+                        } else if crate::error::is_designed_state(response) {
+                            tracing::debug!(
+                                status = response.status().as_u16(),
+                                "answered a designed state"
+                            );
                         }
                     },
                 )
