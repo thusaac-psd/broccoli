@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# No bash under release/, scripts/ or a workflow's run blocks pipes into a
-# reader that can stop before its input ends: `grep -q`, `-m` or `-l`, `head`,
-# a `sed` that quits, an `awk` program that exits, or `read`. Such a reader
-# exits on its first match or line, the writer then dies of SIGPIPE or EPIPE
-# whenever it had not finished writing, and under pipefail that failure becomes
-# the pipeline's status: the check fails at random. Test the text instead
-# (`grep -q pat <<<"$text"`, `[[ $text == *pat* ]]`), capture a command's
-# output first and test that, or let the reader consume all of its input (an
-# awk program keeps its first match in a flag instead of exiting). Every file
-# is checked, not only those that set pipefail themselves: a library runs under
-# the pipefail of the script that sources it, and a workflow step's
-# `shell: bash` sets pipefail. A bash script is one named *.sh or whose shebang
-# runs bash; comments are skipped.
+# No bash under release/, scripts/, or a workflow's or composite action's run
+# blocks pipes into a reader that can stop before its input ends: `grep -q`,
+# `-m` or `-l`, `head`, a `sed` that quits, an `awk` program that exits, or
+# `read`. Such a reader exits on its first match or line, the writer then dies
+# of SIGPIPE or EPIPE whenever it had not finished writing, and under pipefail
+# that failure becomes the pipeline's status: the check fails at random. Test
+# the text instead (`grep -q pat <<<"$text"`, `[[ $text == *pat* ]]`), capture
+# a command's output first and test that, or let the reader consume all of its
+# input (an awk program keeps its first match in a flag instead of exiting).
+# Every file is checked, not only those that set pipefail themselves: a library
+# runs under the pipefail of the script that sources it, and a workflow or
+# composite action step's `shell: bash` sets pipefail. A bash script is one
+# named *.sh or whose shebang runs bash; comments are skipped.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -61,10 +61,12 @@ nscripts="${#files[@]}"
 [ "$nscripts" -gt 20 ] || fail "found only $nscripts bash scripts"
 while IFS= read -r f; do
   files+=("$f")
-done < <(find "$root/.github/workflows" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+done < <(find "$root/.github/workflows" "$root/.github/actions" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
 [ "${#files[@]}" -gt "$nscripts" ] || fail "found no workflow"
 grep -qx "$root/release/test/bin/docker" < <(printf '%s\n' "${files[@]}") \
   || fail "release/test/bin/docker is not scanned"
+grep -qx "$root/.github/actions/setup-isolate/action.yml" < <(printf '%s\n' "${files[@]}") \
+  || fail "the composite actions are not scanned"
 
 rc=0
 for f in "${files[@]}"; do
@@ -76,4 +78,4 @@ for f in "${files[@]}"; do
   done < <(awk '!/^[[:space:]]*#/ { print FNR ": " $0 }' "$f" | grep -E "$readers" || true)
 done
 [ "$rc" = 0 ] || exit 1
-echo "PASS: no early-exit reader in a pipeline of $nscripts bash scripts and $((${#files[@]} - nscripts)) workflows"
+echo "PASS: no early-exit reader in a pipeline of $nscripts bash scripts and $((${#files[@]} - nscripts)) workflows and actions"
