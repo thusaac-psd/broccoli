@@ -209,7 +209,9 @@ pub fn score_all_subtasks(
 /// toward nothing and scores nothing, whatever points it carries. Judging
 /// (which cases run, what each case records), the short-circuit and the
 /// `task` config's validator all read this one rule, over the problem's
-/// [`effective_subtasks`].
+/// [`effective_subtasks`] and all its test cases, as scoring resolves
+/// members: a label a judged case shares with one that is not judged names
+/// neither. Judging builds it once and carries it in its policy.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Counting {
     /// The indexes of the subtasks that count each case, in definition
@@ -248,14 +250,11 @@ impl Counting {
 }
 
 /// The test cases judging runs, in test case order: every case that counts
-/// toward a subtask ([`Counting`]), and every sample, which is judged for
-/// its feedback. A case that counts toward no subtask is not judged: it
-/// would score nothing and appears in no subtask's feedback.
-pub fn compute_scoring_test_case_ids(
-    subtask_defs: &[SubtaskDef],
-    test_cases: &[TestCaseRow],
-) -> Vec<i32> {
-    let counting = Counting::new(subtask_defs, test_cases);
+/// toward a subtask (`counting`, built over all of `test_cases`), and every
+/// sample, which is judged for its feedback. A case that counts toward no
+/// subtask is not judged: it would score nothing and appears in no subtask's
+/// feedback.
+pub fn compute_scoring_test_case_ids(counting: &Counting, test_cases: &[TestCaseRow]) -> Vec<i32> {
     test_cases
         .iter()
         .filter(|tc| tc.is_sample || counting.counts(tc.id))
@@ -755,7 +754,7 @@ mod tests {
             vec!["group_a_zero", "group_a_scored"],
         )];
 
-        let ids = compute_scoring_test_case_ids(&defs, &test_cases);
+        let ids = compute_scoring_test_case_ids(&Counting::new(&defs, &test_cases), &test_cases);
 
         // A case no subtask counts is not judged, whatever points it carries;
         // a sample is judged for its feedback.
@@ -778,7 +777,7 @@ mod tests {
             ),
         ];
 
-        let ids = compute_scoring_test_case_ids(&defs, &test_cases);
+        let ids = compute_scoring_test_case_ids(&Counting::new(&defs, &test_cases), &test_cases);
 
         assert_eq!(ids, vec![1, 2]);
     }
@@ -791,7 +790,10 @@ mod tests {
             test_case(3, 0.0, false, Some("unused_zero")),
         ];
 
-        let ids = compute_scoring_test_case_ids(&effective_subtasks(&[], &test_cases), &test_cases);
+        let ids = compute_scoring_test_case_ids(
+            &Counting::new(&effective_subtasks(&[], &test_cases), &test_cases),
+            &test_cases,
+        );
 
         assert_eq!(ids, vec![1, 2]);
     }
@@ -804,7 +806,7 @@ mod tests {
         ];
         let defs = vec![make_def(SubtaskScoringMethod::GroupMin, 10.0, vec!["2"])];
 
-        let ids = compute_scoring_test_case_ids(&defs, &test_cases);
+        let ids = compute_scoring_test_case_ids(&Counting::new(&defs, &test_cases), &test_cases);
 
         assert_eq!(ids, vec![2]);
     }
@@ -878,7 +880,10 @@ mod tests {
         );
         // Zero-weight cases stay out of the scoring set unless a member names
         // exactly one of them.
-        assert_eq!(compute_scoring_test_case_ids(&[by_label], &cases), vec![1]);
+        assert_eq!(
+            compute_scoring_test_case_ids(&Counting::new(&[by_label], &cases), &cases),
+            vec![1]
+        );
         assert!(
             crate::validate::check_task(
                 &[make_def(SubtaskScoringMethod::GroupMin, 60.0, vec!["dup"])],
@@ -891,7 +896,10 @@ mod tests {
 
         let by_id = make_def(SubtaskScoringMethod::GroupMin, 60.0, vec!["t1", "3"]);
         assert_eq!(score_subtask(&by_id, &cases, &scores).score, 60.0);
-        assert_eq!(compute_scoring_test_case_ids(&[by_id], &cases), vec![1, 3]);
+        assert_eq!(
+            compute_scoring_test_case_ids(&Counting::new(&[by_id], &cases), &cases),
+            vec![1, 3]
+        );
     }
 
     /// A sum subtask's score for a member that names no test case, or names

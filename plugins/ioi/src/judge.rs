@@ -4,7 +4,7 @@ use broccoli_server_sdk::prelude::*;
 
 use crate::config::{ContestConfig, SubtaskDef, TaskConfig};
 use crate::evaluate_batch::evaluate_all_detached;
-use crate::subtasks::compute_scoring_test_case_ids;
+use crate::subtasks::{Counting, compute_scoring_test_case_ids};
 
 /// Context gathered from host functions, passed to pure judge logic.
 pub struct JudgeContext {
@@ -30,8 +30,12 @@ pub fn judge_with_context_detached(
         return refuse(host, req, why.code(), why.message());
     }
 
+    // One membership, over all the problem's test cases as scoring resolves
+    // subtask members: which cases run, what each records and what the
+    // short-circuit follows.
+    let counting = Counting::new(&ctx.subtask_defs, &ctx.test_cases);
     let scoring_test_case_ids: HashSet<i32> =
-        compute_scoring_test_case_ids(&ctx.subtask_defs, &ctx.test_cases)
+        compute_scoring_test_case_ids(&counting, &ctx.test_cases)
             .into_iter()
             .collect();
     let scoring_test_cases: Vec<TestCaseRow> = ctx
@@ -48,6 +52,7 @@ pub fn judge_with_context_detached(
         &scoring_test_cases,
         ctx.submission_id,
         &ctx.subtask_defs,
+        &counting,
     )
 }
 
@@ -295,6 +300,98 @@ mod tests {
             .map(|row| (row.test_case_id, row.score))
             .collect();
         assert_eq!(recorded, vec![(Some(1), 0.0), (Some(2), 100.0)]);
+        assert_eq!(host.submission.last_update().score, Some(100.0));
+    }
+
+    /// A label a judged sample shares with a case that is not judged names
+    /// neither, over all the problem's test cases as scoring resolves it: the
+    /// sample counts toward no subtask, so its row records nothing and its
+    /// failure cuts short no subtask.
+    #[test]
+    fn a_label_a_judged_case_shares_with_one_not_judged_names_neither_in_judging_either() {
+        let host = Host::mock();
+        host.submission.add_test_case(1, 50.0);
+        host.submission.add_test_case(2, 0.0);
+        host.submission.add_test_case(3, 100.0);
+        let row = |id: i32, score: f64, is_sample: bool, label: &str| TestCaseRow {
+            id,
+            score,
+            is_sample,
+            position: id,
+            description: None,
+            label: Some(label.into()),
+            input: TestCaseBodyRef::Missing,
+            expected_output: TestCaseBodyRef::Missing,
+            is_custom: false,
+        };
+        let ctx = explicit_subtask_ctx(
+            vec![
+                row(1, 50.0, true, "x"),
+                row(2, 0.0, false, "x"),
+                row(3, 100.0, false, "t"),
+            ],
+            vec![SubtaskDef {
+                name: "S".into(),
+                scoring_method: SubtaskScoringMethod::GroupMin,
+                max_score: 100.0,
+                test_cases: vec!["x".into(), "t".into()],
+            }],
+        );
+
+        judge(
+            &host,
+            &ctx,
+            vec![
+                TestCaseVerdict::wrong_answer(1),
+                TestCaseVerdict::accepted(3),
+            ],
+        );
+
+        let judged: Vec<i32> = host.eval.detached_windowed_requests()[0]
+            .batch
+            .test_cases
+            .iter()
+            .map(|tc| tc.test_case_id)
+            .collect();
+        assert_eq!(
+            judged,
+            vec![1, 3],
+            "case 2 counts toward nothing and is no sample"
+        );
+        let recorded: Vec<(Option<i32>, f64)> = host
+            .submission
+            .results()
+            .iter()
+            .map(|row| (row.test_case_id, row.score))
+            .collect();
+        assert_eq!(recorded, vec![(Some(1), 0.0), (Some(3), 100.0)]);
+        // The broken member fails the `group_min` subtask, as scoring reads it.
+        assert_eq!(host.submission.last_update().score, Some(0.0));
+
+        // Accepted, the sample still records nothing the total leaves out.
+        let host = Host::mock();
+        for (id, score) in [(1, 50.0), (2, 0.0), (3, 100.0)] {
+            host.submission.add_test_case(id, score);
+        }
+        let sum = explicit_subtask_ctx(
+            ctx.test_cases.clone(),
+            vec![SubtaskDef {
+                scoring_method: SubtaskScoringMethod::Sum,
+                ..ctx.subtask_defs[0].clone()
+            }],
+        );
+        judge(
+            &host,
+            &sum,
+            vec![TestCaseVerdict::accepted(1), TestCaseVerdict::accepted(3)],
+        );
+        let recorded: Vec<(Option<i32>, f64)> = host
+            .submission
+            .results()
+            .iter()
+            .map(|row| (row.test_case_id, row.score))
+            .collect();
+        assert_eq!(recorded, vec![(Some(1), 0.0), (Some(3), 100.0)]);
         assert_eq!(host.submission.last_update().score, Some(100.0));
     }
 
