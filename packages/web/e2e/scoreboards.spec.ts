@@ -64,9 +64,9 @@ test('an IOI scoreboard that cannot load says so, with a retry', async ({
   await page.route(`${IOI}/**`, (route) => route.fulfill(UNAVAILABLE));
   await page.goto('/contests/4/rankings');
   await runClockUntil(page, () =>
-    expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({
-      timeout: 500,
-    }),
+    expect(
+      page.getByRole('button', { name: 'Retry', exact: true }),
+    ).toBeVisible({ timeout: 500 }),
   );
   await expect(page.getByText(NO_SCOREBOARD)).toHaveCount(0);
 });
