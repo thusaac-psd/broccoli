@@ -68,7 +68,7 @@ async fn a_saturated_pool_is_not_taken_for_an_unreachable_database() {
         acquire_timeout: std::time::Duration::from_secs(2),
         ..PgPoolSpec::new(2, 0)
     };
-    let db = common::db::connect(database.url(), &spec, &PgSession::unbounded("test"))
+    let db = common::db::connect(database.url(), &spec, &PgSession::new("test", 0, true))
         .await
         .unwrap();
     let select = || Statement::from_string(DbBackend::Postgres, "SELECT 1");
@@ -140,7 +140,7 @@ async fn small_pool(
         acquire_timeout: std::time::Duration::from_secs(1),
         ..PgPoolSpec::new(max, 0)
     };
-    common::db::connect(database.url(), &spec, &PgSession::unbounded("test"))
+    common::db::connect(database.url(), &spec, &PgSession::new("test", 0, true))
         .await
         .unwrap()
 }

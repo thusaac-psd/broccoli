@@ -136,7 +136,7 @@ mod busy {
             acquire_timeout: Duration::from_secs(30),
             ..PgPoolSpec::new(1, 0)
         };
-        let db = common::db::connect(database.url(), &spec, &PgSession::unbounded("test"))
+        let db = common::db::connect(database.url(), &spec, &PgSession::new("test", 0, true))
             .await
             .unwrap();
 

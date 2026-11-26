@@ -749,7 +749,7 @@ mod tests {
         };
         let db = super::super::connect_lazy_with(
             spec.pool_options(),
-            super::super::pg_connect_options(&url, &super::super::PgSession::unbounded("test"))
+            super::super::pg_connect_options(&url, &super::super::PgSession::new("test", 0, true))
                 .unwrap(),
         );
         let select = || Statement::from_string(DbBackend::Postgres, "SELECT 1");

@@ -14,7 +14,7 @@ async fn every_statement_reaches_the_metric_callback_once() {
     let mut db = common::db::connect(
         database.url(),
         &PgPoolSpec::new(2, 0),
-        &PgSession::unbounded("test"),
+        &PgSession::new("test", 0, true),
     )
     .await
     .unwrap();

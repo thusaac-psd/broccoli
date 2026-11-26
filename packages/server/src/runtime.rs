@@ -74,7 +74,11 @@ impl ServerRuntime {
         // Boot-time schema work runs on one session holding a cluster-wide
         // advisory lock, so replicas booting together serialize instead of
         // racing each other's DDL and check-then-insert seeding.
-        let boot = crate::database::BootSession::acquire(&app_config.database.url).await?;
+        let boot = crate::database::BootSession::acquire(
+            &app_config.database.url,
+            &crate::database::app_session(&app_config.database),
+        )
+        .await?;
         boot.migrate().await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
         crate::seed::ensure_bootstrap_admin(boot.conn(), &app_config.bootstrap).await?;
