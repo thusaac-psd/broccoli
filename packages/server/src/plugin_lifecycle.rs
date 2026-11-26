@@ -345,27 +345,6 @@ impl PluginLifecycle {
             .unwrap_or(false)
     }
 
-    /// Whether this replica serves the version of `plugin_id` the fleet
-    /// published, as its latest report says: not while it still runs the
-    /// previous version (`Outdated`) or files that are not the published
-    /// ones (`Mismatched`). What it knows of the plugin's manifest (which of
-    /// its config fields are secret) holds only then. True before the first
-    /// report: a replica loads what the fleet published at boot.
-    pub(crate) fn serves_published(&self, plugin_id: &str) -> bool {
-        let Ok(reported) = self.reported.lock() else {
-            return false;
-        };
-        reported
-            .as_ref()
-            .and_then(|r| r.report.get(plugin_id))
-            .is_none_or(|state| {
-                !matches!(
-                    state.status,
-                    ReplicaPluginStatus::Outdated | ReplicaPluginStatus::Mismatched
-                )
-            })
-    }
-
     /// A lifecycle whose latest report is `report`.
     #[cfg(test)]
     pub(crate) fn reporting(report: ReplicaReport) -> Self {

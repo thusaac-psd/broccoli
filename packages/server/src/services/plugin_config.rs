@@ -231,29 +231,21 @@ impl<'a> SchemaSource<'a> {
         }
     }
 
-    /// The one rule every config route answers by for `plugin_id`: served
-    /// while it is loaded here at the version the fleet published, else why
-    /// not, by the lifecycle's one account of a plugin that is out
-    /// (`PluginLifecycle::outage`): disabled, loaded on no live server,
-    /// served by another, or loading; or loaded here at another version. A
-    /// plugin no server knows is left to the namespace checks, which find
-    /// no such namespace.
+    /// What every config route answers by for `plugin_id`: the lifecycle's
+    /// one decision of how this replica serves it
+    /// (`PluginLifecycle::served_here`), so a config is read and written only
+    /// where the plugin runs at the version the fleet published. A plugin no
+    /// server knows is left to the namespace checks, which find no such
+    /// namespace.
     pub(crate) fn served_here(&self, plugin_id: &str) -> Result<(), NotServed> {
-        let status = self
-            .registry
-            .read()
-            .ok()
-            .and_then(|registry| registry.get(plugin_id).map(|entry| entry.status.clone()));
-        match status {
-            Some(plugin_core::registry::PluginStatus::Loaded) => {
-                if self.lifecycle.serves_published(plugin_id) {
-                    Ok(())
-                } else {
-                    Err(NotServed::Outdated(plugin_id.to_string()))
-                }
-            }
-            None if !self.lifecycle.is_known(plugin_id) => Ok(()),
-            _ => Err(NotServed::Outage(self.lifecycle.outage(plugin_id))),
+        use crate::plugin_lifecycle::ServedHere;
+        if !self.lifecycle.is_known(plugin_id) {
+            return Ok(());
+        }
+        match self.lifecycle.served_here(plugin_id) {
+            ServedHere::Published => Ok(()),
+            ServedHere::Outdated => Err(NotServed::Outdated(plugin_id.to_string())),
+            ServedHere::Out(outage) => Err(NotServed::Outage(outage)),
         }
     }
 
