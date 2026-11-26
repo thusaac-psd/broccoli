@@ -460,16 +460,7 @@ async fn plugin_verdict(
             );
             AppError::from(e)
         })?;
-    let output: ConfigValidateOutput = serde_json::from_slice(&output).map_err(|e| {
-        plugin_core::guest_log::about(
-            plugin_id,
-            "A config validate answer is unreadable",
-            &format!("{function}: {e}"),
-        );
-        AppError::Internal(format!(
-            "plugin '{plugin_id}' gave an unreadable answer from '{function}'"
-        ))
-    })?;
+    let output = read_validate_answer(plugin_id, function, &output)?;
     Ok(Findings {
         refusals: plugin_field_errors(plugin_id, output.errors),
         issues: plugin_field_errors(plugin_id, output.issues),
@@ -1256,9 +1247,41 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
     labelled(db, incompatible).await
 }
 
+/// What `plugin_id`'s `validate` function answered: an answer it cannot read
+/// is the plugin's failure, never the host's.
+fn read_validate_answer(
+    plugin_id: &str,
+    function: &str,
+    output: &[u8],
+) -> Result<ConfigValidateOutput, AppError> {
+    serde_json::from_slice(output).map_err(|e| {
+        AppError::PluginFailed(crate::error::PluginFailure::new(
+            plugin_id,
+            "A config validate answer is unreadable",
+            &format!("{function}: {e}"),
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `validate` answer the host cannot read is the plugin's failure.
+    #[test]
+    fn an_unreadable_validate_answer_is_the_plugins_failure() {
+        match read_validate_answer("p", "validate", b"not json") {
+            Err(AppError::PluginFailed(failure)) => {
+                assert_eq!(failure.plugin_id(), "p");
+                assert!(
+                    failure.text().starts_with("validate: "),
+                    "{}",
+                    failure.text()
+                );
+            }
+            other => panic!("expected the plugin's failure, got {other:?}"),
+        }
+    }
 
     /// A caller with exactly `permissions`.
     fn caller(permissions: &[&str]) -> crate::extractors::auth::AuthUser {
