@@ -81,6 +81,70 @@ async fn denied(pools: &PluginSqlPools, plugin: &str, sql: &str) {
     );
 }
 
+/// The backend signal functions stay executable by every role: PUBLIC holds
+/// EXECUTE on them and only a superuser could take it away, and the host
+/// needs them itself (it cancels a cut plugin statement by pid and ends a
+/// dropped plugin's sessions). What keeps a plugin from cutting a connection
+/// is the plugin SQL guard, which refuses a statement naming them, and the
+/// database's own rule: without `pg_signal_backend`, a role signals only the
+/// backends of roles whose privileges it has, so a plugin never reaches the
+/// host's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plugin_may_signal_only_its_own_backends() {
+    let f = Fixture::new().await;
+    let pools = f.pools(1);
+    let held = |sql: &'static str| {
+        let pools = &pools;
+        async move { text(pools, "print", sql).await }
+    };
+    for function in [
+        "pg_catalog.pg_cancel_backend(integer)",
+        "pg_catalog.pg_terminate_backend(integer, bigint)",
+    ] {
+        let check = format!("SELECT has_function_privilege('{function}', 'EXECUTE')::text");
+        assert_eq!(
+            text(&pools, "print", &check).await,
+            "true",
+            "plugin: {function}"
+        );
+        let host: Option<String> = f
+            .app
+            .query_one_raw(Statement::from_string(DbBackend::Postgres, check.clone()))
+            .await
+            .unwrap()
+            .map(|r| r.try_get_by_index(0).unwrap());
+        assert_eq!(host.as_deref(), Some("true"), "host: {function}");
+    }
+    assert_eq!(
+        held("SELECT pg_has_role('pg_signal_backend', 'USAGE')::text").await,
+        "false",
+        "the plugin holds pg_signal_backend"
+    );
+    let host_pid: i32 = f
+        .app
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT pg_backend_pid()",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap();
+    denied(
+        &pools,
+        "print",
+        &format!("SELECT pg_cancel_backend({host_pid})"),
+    )
+    .await;
+    denied(
+        &pools,
+        "print",
+        &format!("SELECT pg_terminate_backend({host_pid})"),
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_plugin_has_full_ddl_and_dml_in_its_own_schema() {
     let f = Fixture::new().await;

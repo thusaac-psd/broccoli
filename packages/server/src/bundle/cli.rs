@@ -97,12 +97,23 @@ fn error_chain(e: &anyhow::Error) -> String {
     line
 }
 
+/// The bundle tool's session: the configured one
+/// (`crate::database::app_session`), without a statement timeout, since an
+/// export or import runs long statements. It sends a startup option only
+/// where the operator allowed one.
+pub(crate) fn session(config: &crate::config::DatabaseConfig) -> PgSession {
+    PgSession {
+        application_name: "broccoli-bundle",
+        ..crate::database::app_session(config).unbounded()
+    }
+}
+
 async fn execute(config: &AppConfig, command: Command) -> anyhow::Result<super::Summary> {
     // Two connections: one transaction, and the database blob store beside it.
     let db = common::db::connect(
         &config.database.url,
         &PgPoolSpec::new(2, 1),
-        &PgSession::unbounded("broccoli-bundle"),
+        &session(&config.database),
     )
     .await
     .context("connect to the database")?;

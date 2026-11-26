@@ -2890,12 +2890,15 @@ mod tests {
             .expect("start postgres");
         let port = container.get_host_port_ipv4(5432).await.expect("port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        crate::database::BootSession::acquire(&url)
-            .await
-            .expect("boot session")
-            .migrate()
-            .await
-            .expect("migrate");
+        crate::database::BootSession::acquire(
+            &url,
+            &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+        )
+        .await
+        .expect("boot session")
+        .migrate()
+        .await
+        .expect("migrate");
         let db = sea_orm::Database::connect(&url)
             .await
             .expect("connect")
@@ -3491,12 +3494,15 @@ mod tests {
             .expect("start postgres");
         let port = container.get_host_port_ipv4(5432).await.expect("port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        crate::database::BootSession::acquire(&url)
-            .await
-            .expect("boot session")
-            .migrate()
-            .await
-            .expect("migrate");
+        crate::database::BootSession::acquire(
+            &url,
+            &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+        )
+        .await
+        .expect("boot session")
+        .migrate()
+        .await
+        .expect("migrate");
         let connect = || async {
             common::db::DatabaseConnection::from(
                 sea_orm::Database::connect(&url).await.expect("connect"),

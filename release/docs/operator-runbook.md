@@ -45,19 +45,17 @@ docker compose --env-file .env.gateway -f docker-compose.gateway.yaml logs --tai
 Each server answers three probes and `/metrics` on its main HTTP port:
 
 - `/livez`, liveness: the process is up and serving HTTP. It calls nothing else.
-- `/readyz`, readiness: this server should take browsers. It answers 503
-  `"not_ready"` while another server serves every enabled plugin this one serves
-  and more: a plugin is loaded there but not here (its load keeps failing, or
-  its files are missing), so a browser pinned here would miss it, whatever it
-  provides (a contest type, a language, an evaluator, a checker, a page or
-  route), until the load succeeds. A request here that needs it answers
-  `503 PLUGIN_NOT_LOADED_HERE`, naming the plugin in `details.plugin_id`, and a
-  result it governs reads as withheld (`not_loaded_here`). The answer carries
-  `Retry-After: 10`: two failed probes five seconds apart, after which the
-  gateway sends the retry to a server that serves it. Servers that each lack a
-  different plugin, or a plugin no server could load, are all ready, so the
-  gateway always keeps a server. It makes no database or Redis call, and its
-  body never names a plugin.
+- `/readyz`, readiness: this server should take browsers. A server is ready
+  unless it lacks an enabled plugin that another live server serves, whatever
+  the plugin provides (a contest type, a language, an evaluator, a checker, a
+  page or route). A server counts as serving a plugin only in the version the
+  fleet published, not an outdated or mismatched copy. Its absence counts only
+  once the server has applied the plugin's newest publish, so an enable, reload
+  or upload never takes the servers still loading it out of rotation. If every
+  server lacks something another has, the fleet is misconfigured and the System
+  page says so; the gateway keeps one server ready, the one serving the most
+  plugins (then the lowest server id). It answers 503 `"not_ready"` otherwise,
+  makes no database or Redis call, and its body never names a plugin.
 - `/healthz`, the deep check for monitoring: it also reaches Postgres, Redis and
   blob storage (below). It is never a gateway probe: the servers share those, so
   one blip would fail it on every server at once.
@@ -74,16 +72,22 @@ is ready, and the plugins it lacks while another server serves them; the admin
 plugin page shows each server's load state and error, and the server's logs have
 the rest. Fix the load and click Reload.
 
-Readiness compares a server with every other server that shares its database and
-whose heartbeat is fresh: servers touch it every 15 s, and one counts for 30 s
-after its last touch, so a server that died, or stopped without leaving cleanly,
-stops holding the others out of rotation within half a minute. Every server on
-one database therefore belongs behind the same gateway: a server outside it
-still counts, and can keep the gateway's servers not ready for a plugin only it
-serves while the gateway cannot send it a browser. If servers are ejected under
-load while their logs show them still serving, raise `health_timeout` or
-`health_fails` there and restart the gateway. A Prometheus scrape of `/metrics`
-can likewise time out under load; give it a scrape timeout of a few seconds.
+A request on a server that lacks a plugin answers `503 PLUGIN_NOT_LOADED_HERE`
+(`Retry-After: 10`, naming the plugin in `details.plugin_id`; a result the
+plugin governs reads as withheld, `not_loaded_here`) only while a ready server
+has it, so the retry reaches that server once the gateway has moved the browser;
+otherwise it answers `PLUGIN_NOT_LOADED`, naming the plugin.
+
+A server is live while it touched its heartbeat in the last 15 s (it touches it
+every 5 s), about as long as the gateway takes to eject a failing server, so a
+server that died, or stopped without leaving cleanly, stops counting within that
+window. Every server on one database belongs behind the same gateway: a server
+outside it still counts, and can keep the gateway's servers not ready for a
+plugin only it serves while the gateway cannot send it a browser. If servers are
+ejected under load while their logs show them still serving, raise
+`health_timeout` or `health_fails` there and restart the gateway. A Prometheus
+scrape of `/metrics` can likewise time out under load; give it a scrape timeout
+of a few seconds.
 
 `/healthz` answers 200 with `"status": "ok"` while no dependency is down, and
 503 with `"status": "degraded"` and the component that is (`"db"`, `"mq"` or
@@ -319,11 +323,26 @@ this when the field is left empty. A save that leaves a stored secret out, null
 or empty, or sends a ref the item does not hold (or one read before the secret
 was set again), is refused with `secret_not_stored`: re-enter the secret, or
 clear it on purpose. A station's token is required, so it can never be cleared
-or left empty (`secret_required`): enter one.
+or left empty (`secret_required`): enter one. Every new value typed for a secret
+gets a new ref, even the value already stored. A secret stored before this
+release gets its ref when its plugin loads, so saving the settings unchanged
+keeps it.
 
-A server not yet running a plugin's published version refuses saves of that
-plugin's settings with `PLUGIN_OUTDATED_HERE` (503 with `Retry-After`); it
-serves them once it reconciles, within seconds, so a retry lands.
+A server reads, saves or deletes a plugin's settings only while it serves that
+plugin: it has the plugin loaded at the version the fleet published. Otherwise
+every settings route (read, save, delete, the plugin's own settings list, the
+config issues) answers a retryable 503, with `Retry-After`, that names the
+plugin, and changes or removes nothing:
+
+- `PLUGIN_NOT_LOADED_HERE`: another live server serves it. The gateway moves the
+  browser there; retry in a moment.
+- `PLUGIN_NOT_LOADED`: no live server loads it.
+- `PLUGIN_OUTDATED_HERE`: this server runs another version; it serves once it
+  reconciles, within seconds.
+- `PLUGIN_DISABLED`: an administrator disabled it.
+
+A problem's, contest's or contest problem's settings dialog shows such a
+plugin's saved settings as unavailable, with the reason in place of the form.
 
 The export reads each plugin's schema from its published upload or the server's
 plugin directory. The configs of a plugin with neither (removed, or never
@@ -345,6 +364,11 @@ docker compose --env-file .env.server -f docker-compose.server.yaml logs -f serv
 docker compose --env-file .env.worker -f docker-compose.worker.yaml logs -f worker
 docker compose --env-file .env.infra -f docker-compose.infra.yaml logs -f db redis seaweedfs
 ```
+
+Designed retryable answers, every answer that carries `Retry-After` and a
+`/readyz` that is not ready, log at DEBUG, not ERROR: they say a dependency or a
+plugin is not available here yet, which the client retries, not that something
+broke. An ERROR line is worth an alert.
 
 For worker sandbox failures, first confirm the worker service is privileged and
 that the worker host uses cgroup v2.
@@ -441,17 +465,59 @@ installer sets 500 too, and the development `docker-compose.yaml` 200.
 
 **Behind PgBouncer**
 
+The shipped installs talk to Postgres directly. A PgBouncer in front of it needs
+four things, all checked by `release/test/pgbouncer_boot_test.sh` against
+PgBouncer 1.26:
+
+1. **Session pooling** (`pool_mode = session`). The boot lock is a session
+   advisory lock, the claim loop listens on a channel and the driver prepares
+   its statements, none of which survive transaction pooling.
+2. **No startup options from the server.** Set
+   `database.statement_timeout_secs = 0` and `database.tcp_keepalives = false`
+   (see the configuration reference): every session the server opens, its pools,
+   the boot lock's and the bundle tool's, then sends none. PgBouncer refuses a
+   connection that sends one it does not know ("unsupported startup parameter in
+   options").
+3. **`ignore_startup_parameters = extra_float_digits`**, which the driver sends
+   on every connection. The `edoburu/pgbouncer` image sets this by default; a
+   hand-written `pgbouncer.ini` lists it.
+4. **A password lookup that covers the plugin roles.** The server gives each
+   plugin that uses SQL its own database role, with a password it generates, and
+   that role logs in through PgBouncer too, so no `auth_file` can list it.
+   PgBouncer looks it up with `auth_query`, run as its `auth_user`, the app
+   role; its default query reads `pg_authid`, which only a superuser may, so the
+   plugin fails to load with "bouncer config error". Run `user-lookup.sql`
+   (`release/pgbouncer/` in the repository, `pgbouncer/` in the airgap bundle)
+   once, as the superuser, in Broccoli's database:
+
+   ```bash
+   psql -v ON_ERROR_STOP=1 -v app=broccoli -U postgres -d broccoli \
+     -f pgbouncer/user-lookup.sql
+   ```
+
+   It creates `pgbouncer.user_lookup`, which only the app role may call and
+   which answers only for login roles that are not superusers. Then set:
+
+   ```ini
+   auth_type = scram-sha-256
+   auth_user = broccoli
+   auth_query = SELECT uname, phash FROM pgbouncer.user_lookup($1)
+   ```
+
+In session mode each client connection holds a server connection, so give
+PgBouncer room for the whole fleet: `default_pool_size` at least the most
+connections one role opens (the app role's share across every server, see
+Database connections above) and `max_client_conn` at least the fleet's total.
+
 A plugin statement that runs past its call's deadline is cut. Talking to
 Postgres directly, the server cuts it by closing its connection, which Postgres
 notices within 100 ms (`client_connection_check_interval`, which plugin SQL may
-not change). That needs startup options, and PgBouncer rejects them, so behind
-PgBouncer set `database.statement_timeout_secs = 0` and
-`database.tcp_keepalives = false` (see the configuration reference). The server
-then sends no startup options and cuts a statement by cancelling its backend
-instead (`pg_cancel_backend`, by the pid it read when it checked the connection
-out). It closes only when it sends startup options and a probe connection reads
-the check interval back as set, so a pooler that ignores the options is cut by
-cancelling too.
+not change). That needs a startup option, so behind PgBouncer, with none sent,
+the server cuts a statement by cancelling its backend instead
+(`pg_cancel_backend`, by the pid it read when it checked the connection out). It
+closes only when it sends startup options and a probe connection reads the check
+interval back as set, so a pooler that ignores the options is cut by cancelling
+too.
 
 **Sizing Redis memory**
 

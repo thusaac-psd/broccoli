@@ -71,7 +71,7 @@ pub async fn init_db_with_max_connections(
     max_connections: u32,
     session: &PgSession,
 ) -> Result<DatabaseConnection, DbErr> {
-    let boot = BootSession::acquire(db_url).await?;
+    let boot = BootSession::acquire(db_url, session).await?;
     boot.migrate().await?;
     boot.release().await?;
     connect_main_pool(db_url, max_connections, session).await
@@ -331,15 +331,18 @@ pub struct BootSession {
 }
 
 impl BootSession {
+    /// The boot session's settings: the configured ones ([`app_session`]),
+    /// without a statement timeout, so it sends a startup option only where
+    /// the operator allowed it.
+    pub fn session(app: &PgSession) -> PgSession {
+        app.clone().unbounded()
+    }
+
     /// Open the session and take the boot lock, waiting for a peer that is
     /// booting to finish first.
-    pub async fn acquire(db_url: &str) -> Result<Self, DbErr> {
-        let db = common::db::connect(
-            db_url,
-            &PgPoolSpec::single_session(),
-            &PgSession::unbounded(APP_NAME),
-        )
-        .await?;
+    pub async fn acquire(db_url: &str, app: &PgSession) -> Result<Self, DbErr> {
+        let db =
+            common::db::connect(db_url, &PgPoolSpec::single_session(), &Self::session(app)).await?;
         let boot = Self { db };
         // Override any role- or database-level default too. A plain `SET` (not
         // a startup option) also works through a PgBouncer in session mode.
@@ -465,6 +468,74 @@ mod tests {
         app_session(&crate::config::DatabaseConfig::default())
     }
 
+    /// A server configured for a pooler that refuses startup options
+    /// (`statement_timeout_secs = 0`, `tcp_keepalives = false`) sends none on
+    /// any session it opens: its pools, the plugin pools, the boot lock's
+    /// session and the bundle tool's.
+    #[test]
+    fn no_session_sends_startup_options_when_the_config_turns_them_off() {
+        let config = crate::config::DatabaseConfig {
+            statement_timeout_secs: 0,
+            tcp_keepalives: false,
+            ..Default::default()
+        };
+        let app = app_session(&config);
+        for (name, session) in [
+            ("app", app.clone()),
+            ("plugin", plugin_session(&app)),
+            ("boot", BootSession::session(&app)),
+            ("bundle", crate::bundle::cli::session(&config)),
+        ] {
+            assert!(
+                !session.sends_startup_options(),
+                "the {name} session sends startup options: {session:?}"
+            );
+        }
+        // The same sessions do send them when the config asks.
+        let app = app_session(&crate::config::DatabaseConfig::default());
+        assert!(BootSession::session(&app).sends_startup_options());
+        assert!(
+            BootSession::session(&app).statement_timeout.is_none(),
+            "boot DDL runs unbounded"
+        );
+    }
+
+    /// Every session the server opens is derived from the configured one
+    /// ([`app_session`]): no code outside this module builds a session of its
+    /// own, so none can send a startup option the operator turned off.
+    #[test]
+    fn only_this_module_builds_a_session_from_scratch() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src.clone()];
+        let mut offenders = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                // `tests.rs` files are test modules of their own.
+                if path.extension().is_none_or(|e| e != "rs")
+                    || path.ends_with("src/database.rs")
+                    || path.ends_with("tests.rs")
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                // Test modules may build what they test against.
+                let code = text.split("#[cfg(test)]").next().unwrap_or("");
+                if code.contains("PgSession::new(") {
+                    offenders.push(path.strip_prefix(&src).unwrap().display().to_string());
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "builds a session from scratch: {offenders:?}"
+        );
+    }
+
     async fn fresh_postgres() -> (
         testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
         String,
@@ -484,7 +555,9 @@ mod tests {
     #[tokio::test]
     async fn the_usable_connections_leave_out_the_superuser_slots() {
         let (_pg, url) = fresh_postgres().await;
-        let boot = BootSession::acquire(&url).await.expect("boot session");
+        let boot = BootSession::acquire(&url, &test_session())
+            .await
+            .expect("boot session");
         // Stock Postgres: 100 connections, 3 for superusers.
         assert_eq!(usable_connections(boot.conn()).await.unwrap(), 97);
         boot.release().await.unwrap();
@@ -620,7 +693,7 @@ mod tests {
 
     /// The server's boot sequence as `ServerRuntime::build` runs it.
     async fn boot_like_the_server(url: &str) -> Result<(), DbErr> {
-        let boot = BootSession::acquire(url).await?;
+        let boot = BootSession::acquire(url, &test_session()).await?;
         boot.migrate().await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
         let bootstrap = crate::config::BootstrapConfig {
@@ -646,7 +719,9 @@ mod tests {
             .await
             .expect("role default");
         admin.close().await.expect("close");
-        let boot = BootSession::acquire(&url).await.expect("acquire");
+        let boot = BootSession::acquire(&url, &test_session())
+            .await
+            .expect("acquire");
         boot.conn()
             .execute_unprepared("SELECT pg_sleep(1.5)")
             .await
@@ -658,9 +733,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn boot_lock_serializes_booters() {
         let (_c, url) = fresh_postgres().await;
-        let first = BootSession::acquire(&url).await.expect("first acquire");
+        let first = BootSession::acquire(&url, &test_session())
+            .await
+            .expect("first acquire");
         let second_url = url.clone();
-        let mut second = tokio::spawn(async move { BootSession::acquire(&second_url).await });
+        let mut second =
+            tokio::spawn(async move { BootSession::acquire(&second_url, &test_session()).await });
         assert!(
             tokio::time::timeout(Duration::from_millis(500), &mut second)
                 .await
@@ -771,7 +849,7 @@ mod tests {
             .map(|_| {
                 let url = url.clone();
                 tokio::spawn(async move {
-                    let boot = BootSession::acquire(&url).await?;
+                    let boot = BootSession::acquire(&url, &test_session()).await?;
                     boot.migrate_with::<NewerBuild>().await?;
                     boot.release().await
                 })
@@ -780,7 +858,9 @@ mod tests {
         for b in boots {
             b.await.expect("join").expect("every newer boot succeeds");
         }
-        let boot = BootSession::acquire(&url).await.expect("acquire");
+        let boot = BootSession::acquire(&url, &test_session())
+            .await
+            .expect("acquire");
         let probe = boot
             .conn()
             .query_one_raw(sea_orm::Statement::from_string(
@@ -816,7 +896,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn boot_refuses_a_foreign_database_untouched() {
         let (_c, url) = fresh_postgres().await;
-        let boot = BootSession::acquire(&url).await.expect("acquire");
+        let boot = BootSession::acquire(&url, &test_session())
+            .await
+            .expect("acquire");
         boot.conn()
             .execute_unprepared("CREATE TABLE someone_elses (id int)")
             .await

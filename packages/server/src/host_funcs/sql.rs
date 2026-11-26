@@ -1565,12 +1565,15 @@ mod tests {
     }
 
     async fn migrate(url: &str) {
-        crate::database::BootSession::acquire(url)
-            .await
-            .expect("boot session")
-            .migrate()
-            .await
-            .expect("migrate");
+        crate::database::BootSession::acquire(
+            url,
+            &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+        )
+        .await
+        .expect("boot session")
+        .migrate()
+        .await
+        .expect("migrate");
     }
 
     /// Reading a connection's backend pid is the host's bookkeeping for the
@@ -2096,12 +2099,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_standalone_statement_cut_at_its_deadline_never_applies() {
         let (_container, url, db) = one_connection().await;
-        crate::database::BootSession::acquire(&url)
-            .await
-            .expect("boot session")
-            .migrate()
-            .await
-            .expect("migrate");
+        crate::database::BootSession::acquire(
+            &url,
+            &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+        )
+        .await
+        .expect("boot session")
+        .migrate()
+        .await
+        .expect("migrate");
         let sql = plugin_sql(&url).await;
         let call = |deadline: Option<Instant>| crate::plugin_db::SqlCall {
             deadline,
@@ -2315,12 +2321,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_nul_is_replaced_alike_in_and_outside_a_transaction() {
         let (_container, url, db) = one_connection().await;
-        crate::database::BootSession::acquire(&url)
-            .await
-            .expect("boot session")
-            .migrate()
-            .await
-            .expect("migrate");
+        crate::database::BootSession::acquire(
+            &url,
+            &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+        )
+        .await
+        .expect("boot session")
+        .migrate()
+        .await
+        .expect("migrate");
         let sql = plugin_sql(&url).await;
         let call = crate::plugin_db::SqlCall::default();
         let statement = |text: &str, args: &str| plugin_statement(text, parse_args(args).unwrap());

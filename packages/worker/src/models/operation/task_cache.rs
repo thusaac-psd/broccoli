@@ -318,7 +318,7 @@ mod tests {
         let db = common::db::connect(
             &url,
             &common::db::PgPoolSpec::new(2, 1),
-            &common::db::PgSession::unbounded("task-cache-test"),
+            &common::db::PgSession::new("task-cache-test", 0, true),
         )
         .await
         .expect("connect");

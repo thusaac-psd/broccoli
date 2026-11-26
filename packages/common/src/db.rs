@@ -9,7 +9,7 @@
 //!
 //! - `statement_timeout` makes the *database* abort a statement that runs too
 //!   long, so a slow query or a lock pile-up surfaces as an error instead of a
-//!   stuck caller. Boot DDL opts out (see [`PgSession::unbounded`]).
+//!   stuck caller. Boot DDL opts out (see [`PgSession::unbounded`]), keeping every other setting.
 //! - `tcp_keepalives_*` make the *database* notice a client that vanished
 //!   without a FIN (power loss, cable pull) within about a minute, which frees
 //!   its connection slot and every lock it held, including the boot advisory
@@ -110,16 +110,15 @@ impl PgSession {
         }
     }
 
-    /// A session that sends no statement timeout, for known long statements
-    /// such as migrations and boot backfills. Callers that must
+    /// This session without its statement timeout, for known long statements
+    /// such as migrations and boot backfills; every other setting, the
+    /// keepalives the operator chose included, is kept. Callers that must
     /// also override a role-level default run `SET statement_timeout = 0`
     /// themselves (see the server's boot session).
-    pub fn unbounded(application_name: &'static str) -> Self {
+    pub fn unbounded(self) -> Self {
         Self {
-            application_name,
             statement_timeout: None,
-            tcp_keepalives: true,
-            client_check_interval: None,
+            ..self
         }
     }
 
@@ -403,8 +402,18 @@ mod tests {
         let s = startup_options(&o);
         assert!(!s.contains("statement_timeout"), "{s}");
         assert!(s.contains("tcp_keepalives_idle=30"), "{s}");
-        let o = pg_connect_options("postgres://db/x", &PgSession::unbounded("t")).unwrap();
+        let o = pg_connect_options("postgres://db/x", &PgSession::new("t", 5, true).unbounded())
+            .unwrap();
         assert!(!startup_options(&o).contains("statement_timeout"));
+    }
+
+    /// An unbounded session drops only its statement timeout: keepalives the
+    /// operator turned off stay off.
+    #[test]
+    fn unbounded_keeps_the_configured_keepalives() {
+        let session = PgSession::new("t", 5, false).unbounded();
+        assert!(!session.sends_startup_options(), "{session:?}");
+        assert!(PgSession::new("t", 5, true).unbounded().tcp_keepalives);
     }
 
     /// With every bound disabled no `options` startup parameter is sent, so a

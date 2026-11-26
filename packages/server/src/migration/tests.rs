@@ -38,7 +38,7 @@ async fn connect(url: &str) -> DatabaseConnection {
     common::db::connect(
         url,
         &PgPoolSpec::single_session(),
-        &PgSession::unbounded("schema-test"),
+        &PgSession::new("schema-test", 0, true),
     )
     .await
     .expect("connect")
@@ -144,9 +144,12 @@ async fn the_migrations_create_the_schema_the_code_expects() {
         .expect("create the entity database");
 
     let migrated_url = url(port, "postgres");
-    let boot = BootSession::acquire(&migrated_url)
-        .await
-        .expect("boot session");
+    let boot = BootSession::acquire(
+        &migrated_url,
+        &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+    )
+    .await
+    .expect("boot session");
     boot.migrate().await.expect("migrate an empty database");
     let migrated = boot.conn();
     let before = catalog(migrated).await;
@@ -196,9 +199,12 @@ async fn the_migrations_create_the_schema_the_code_expects() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_claim_indexes_match_the_predicates_the_queue_scans_use() {
     let (_pg, port) = postgres().await;
-    let boot = BootSession::acquire(&url(port, "postgres"))
-        .await
-        .expect("boot session");
+    let boot = BootSession::acquire(
+        &url(port, "postgres"),
+        &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+    )
+    .await
+    .expect("boot session");
     boot.migrate().await.expect("migrate");
     let db = boot.conn();
     let predicate = |sql: String| async move {
@@ -394,7 +400,12 @@ async fn a_database_the_released_build_ran_upgrades_to_this_build() {
     let db_url = url(port, "postgres");
     released_database(&connect(&db_url).await).await;
 
-    let boot = BootSession::acquire(&db_url).await.expect("boot session");
+    let boot = BootSession::acquire(
+        &db_url,
+        &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+    )
+    .await
+    .expect("boot session");
     boot.migrate()
         .await
         .expect("boot migrates a database the released build ran");

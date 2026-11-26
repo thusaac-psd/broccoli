@@ -41,7 +41,7 @@ created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 B="$OUTPUT/broccoli-airgap-$VERSION"
 rm -rf "$B"
-mkdir -p "$B"/{images,compose,cli,ca,caddy,trust-ca,lib,native}
+mkdir -p "$B"/{images,compose,cli,ca,caddy,trust-ca,lib,native,pgbouncer}
 
 # 1. CA — private keys NEVER enter the client-distributed (manifested) tree.
 #    Only the public root.crt ships to clients. root.key (and the leaf's
@@ -80,6 +80,9 @@ cp "$here/caddy/Caddyfile.airgap" "$B/caddy/Caddyfile.airgap"
 cp "$here"/ca/issue-leaf.sh "$here"/ca/sign.sh "$B/ca/"
 cp "$here"/trust-ca/* "$B/trust-ca/"
 cp "$repo/release/native/live-boot-preflight.sh" "$B/native/live-boot-preflight.sh"
+# The password lookup a PgBouncer in front of the database needs (see the
+# runbook's Behind PgBouncer), carried so a closed lab has it offline.
+cp "$repo/release/pgbouncer/user-lookup.sql" "$B/pgbouncer/user-lookup.sql"
 chmod +x "$B/native/live-boot-preflight.sh"
 
 # 3. Compose templates + env examples (reuse release/, do not fork)
