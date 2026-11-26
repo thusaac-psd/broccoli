@@ -367,11 +367,17 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement the
 dispatch or its plugins ran that the database could not serve
 (`DATABASE_UNAVAILABLE`): the database lost. A plugin's connection that is
-lost is confirmed with one probe on the host's own pool: if the host database
-answers, the plugin's connection was cut under it, which is the plugin's own
-failure, and the plugin SQL guard refuses the statements that would cut one
-(`pg_terminate_backend`, `pg_cancel_backend`, `pg_signal_backend`). One rule
-records it,
+lost is checked with one probe on the host's own pool. If the host database
+is gone too, it is an outage, handed back however often it happens. If the
+host database answers, only the plugin's connection was lost (a fast restart,
+a failover or a connection reaper ended its backend): the platform's too, so
+it is handed back (`DispatchFault::ConnectionLost`), but only
+`LOSS_HANDBACKS` (5) times per unit, counted on the unit's row
+(`lost_handbacks`), and after that it is a failure judging the submission,
+within its retry budget. The cap bounds the one route a plugin has to end its
+own backend: the plugin SQL guard refuses the statements that would
+(`pg_terminate_backend`, `pg_cancel_backend`, `pg_signal_backend`), but
+dynamic SQL escapes a text guard. One rule records it,
 `host_funcs::host_db`: plugin SQL where every unavailable statement ends
 (`host_funcs::sql::unavailable`, through `host_db::fail_under`), the host's
 own SQL in a host function through `host_db::failed`, and the dispatch's own

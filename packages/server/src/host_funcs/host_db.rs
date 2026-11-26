@@ -123,6 +123,20 @@ pub(crate) fn fail_under(dispatch: Option<&Dispatch>, outage: Outage, message: &
     fail_call(outage);
 }
 
+/// Fail the running call as the database's (`DATABASE_UNAVAILABLE`) because
+/// the plugin's SQL connection was lost while the host database answers,
+/// and, under `dispatch`, record the loss (`DispatchFault::ConnectionLost`):
+/// the attempt is handed back, but only up to the unit's loss cap, since a
+/// plugin can end its own backend by SQL no guard reads.
+pub(crate) fn lost_under(dispatch: Option<&Dispatch>, message: &str) {
+    if let Some(dispatch) = dispatch {
+        dispatch
+            .faults()
+            .record(DispatchFault::ConnectionLost, message.to_string());
+    }
+    fail_call(Outage::Lost);
+}
+
 /// Fail the running call as busy (`DATABASE_BUSY`) because no plugin SQL
 /// connection was free for it while it held none, and, under `dispatch`,
 /// record the contention (`DispatchFault::SqlContended`): the attempt is

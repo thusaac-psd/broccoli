@@ -1,11 +1,14 @@
 use sea_orm_migration::prelude::*;
 
-/// How many times a unit's attempt was handed back because its plugins found
-/// no plugin SQL connection free (`contended_handbacks`, on a judgement and
-/// on a code run): contention with the work beside it hands an attempt back
-/// spending nothing, but only up to `judging::fault::CONTENTION_HANDBACKS`
-/// times per unit, after which it is a judging failure within the
-/// submission's retry budget. Counted on the row, so the cap holds across
+/// How many times a unit's attempt was handed back for a cause its own
+/// plugins can bring about, on a judgement and on a code run: no plugin SQL
+/// connection free (`contended_handbacks`, contention with the work beside
+/// it, capped by `judging::fault::CONTENTION_HANDBACKS`), and a plugin SQL
+/// connection lost while the host database answers (`lost_handbacks`, a
+/// restart, a failover or a reaper, capped by
+/// `judging::fault::LOSS_HANDBACKS`). Each hands an attempt back spending
+/// nothing up to its cap, after which it is a judging failure within the
+/// submission's retry budget. Counted on the row, so the caps hold across
 /// replicas and restarts. Plugins read both tables, so the plugin group role
 /// may read the new columns as it reads every other column that is not
 /// content.
@@ -14,9 +17,11 @@ use sea_orm_migration::prelude::*;
 /// (`pg_terminate_backend`, `pg_cancel_backend`, `pg_signal_backend`): a
 /// plugin that cut a connection could pass its own failure off as the
 /// database lost. The plugin SQL guard refuses any statement naming them
-/// (`host_funcs::sql`), and a lost plugin connection is confirmed against the
-/// host pool (`plugin_db::PluginSqlPools::confirmed`), since PUBLIC keeps
-/// its default right to the functions.
+/// (`host_funcs::sql`), and since PUBLIC keeps its default right to the
+/// functions and dynamic SQL escapes a text guard, a lost plugin connection
+/// the host pool's probe finds the database answering under
+/// (`plugin_db::PluginSqlPools::confirmed`) hands back only up to
+/// `lost_handbacks`'s cap.
 ///
 /// Additive (release/docs/upgrade.md): defaulted columns servers of the
 /// previous release keep working against.
@@ -30,8 +35,11 @@ impl MigrationName for Migration {
 
 const UP: &str = r#"
 ALTER TABLE public.submission_judgement
-    ADD COLUMN contended_handbacks integer NOT NULL DEFAULT 0;
-ALTER TABLE public.code_run ADD COLUMN contended_handbacks integer NOT NULL DEFAULT 0;
+    ADD COLUMN contended_handbacks integer NOT NULL DEFAULT 0,
+    ADD COLUMN lost_handbacks integer NOT NULL DEFAULT 0;
+ALTER TABLE public.code_run
+    ADD COLUMN contended_handbacks integer NOT NULL DEFAULT 0,
+    ADD COLUMN lost_handbacks integer NOT NULL DEFAULT 0;
 DO $$
 DECLARE
   plugin_group name;
@@ -40,9 +48,11 @@ BEGIN
   IF plugin_group IS NULL THEN
     RETURN;
   END IF;
-  EXECUTE format('GRANT SELECT (contended_handbacks) ON public.submission_judgement TO %I',
+  EXECUTE format(
+    'GRANT SELECT (contended_handbacks, lost_handbacks) ON public.submission_judgement TO %I',
     plugin_group);
-  EXECUTE format('GRANT SELECT (contended_handbacks) ON public.code_run TO %I', plugin_group);
+  EXECUTE format('GRANT SELECT (contended_handbacks, lost_handbacks) ON public.code_run TO %I',
+    plugin_group);
 EXCEPTION
   WHEN insufficient_privilege THEN
     RAISE WARNING 'plugin group grants skipped (insufficient privilege): %', SQLERRM;
@@ -70,8 +80,9 @@ END $$;
 "#;
 
 const DOWN: &str = r#"
-ALTER TABLE public.code_run DROP COLUMN contended_handbacks;
-ALTER TABLE public.submission_judgement DROP COLUMN contended_handbacks;
+ALTER TABLE public.code_run DROP COLUMN lost_handbacks, DROP COLUMN contended_handbacks;
+ALTER TABLE public.submission_judgement
+    DROP COLUMN lost_handbacks, DROP COLUMN contended_handbacks;
 "#;
 
 #[async_trait::async_trait]

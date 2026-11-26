@@ -107,6 +107,11 @@ pub struct Model {
     /// (`judging::fault::CONTENTION_HANDBACKS` caps it).
     #[sea_orm(default_value = 0)]
     pub contended_handbacks: i32,
+    /// How many times its attempt was handed back for a plugin SQL connection
+    /// lost while the host database answers
+    /// (`judging::fault::LOSS_HANDBACKS` caps it).
+    #[sea_orm(default_value = 0)]
+    pub lost_handbacks: i32,
 
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,

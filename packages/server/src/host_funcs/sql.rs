@@ -372,6 +372,7 @@ fn unavailable_under(
         Unanswered::DatabaseLost => {
             super::host_db::fail_under(dispatch, common::db::Outage::Lost, &e.to_string())
         }
+        Unanswered::ConnectionLost => super::host_db::lost_under(dispatch, &e.to_string()),
         Unanswered::Contended => super::host_db::contended_under(dispatch, &e.to_string()),
         Unanswered::Plugin => plugin_core::executor::fail_unavailable(),
         // The plugin waits on a connection it holds itself: an error of its
@@ -386,6 +387,10 @@ fn unavailable_under(
 enum Unanswered {
     /// `DATABASE_UNAVAILABLE`: the database is lost, the platform's fault.
     DatabaseLost,
+    /// `DATABASE_UNAVAILABLE`: the plugin's connection was lost while the
+    /// host database answers, the platform's fault
+    /// (`DispatchFault::ConnectionLost`, handed back up to a cap).
+    ConnectionLost,
     /// `DATABASE_BUSY`: no plugin SQL connection was free for a call that
     /// held none, contention with the work beside it
     /// (`DispatchFault::SqlContended`, handed back up to a cap).
@@ -403,7 +408,8 @@ impl Unanswered {
         match e {
             Unavailable::Outage(Outage::Lost, _) => Self::DatabaseLost,
             Unavailable::Outage(Outage::Busy, _) | Unavailable::Busy => Self::Contended,
-            Unavailable::SelfHeld | Unavailable::Dropped(_) => Self::Itself,
+            Unavailable::ConnectionLost(_) => Self::ConnectionLost,
+            Unavailable::SelfHeld => Self::Itself,
             Unavailable::Deadline | Unavailable::Unloaded | Unavailable::Unprovisioned(_) => {
                 Self::Plugin
             }
@@ -1647,6 +1653,12 @@ mod tests {
                 crate::plugin_db::Unavailable::Busy,
                 DispatchFault::SqlContended,
             ),
+            // A plugin connection lost while the host database answers is
+            // the platform's too: handed back up to the unit's loss cap.
+            (
+                crate::plugin_db::Unavailable::ConnectionLost("terminated".into()),
+                DispatchFault::ConnectionLost,
+            ),
         ] {
             let (dispatch, faults) = under();
             let what = cause.to_string();
@@ -1764,29 +1776,51 @@ mod tests {
         );
     }
 
-    /// A plugin that cuts its own connection (terminates its backend) while
-    /// the database answers cannot pass that off as the database's outage:
-    /// the probe on the host's pool answers, so the loss is the plugin's own
-    /// failure, never a hand-back or a refunded timer.
+    /// A plugin connection lost mid-statement while the host database still
+    /// answers (a fast restart, a failover or a connection reaper ending its
+    /// backend) is the platform's, never the plugin's: the probe tells it
+    /// from a lost database, and it fails the call as the database's
+    /// (`DATABASE_UNAVAILABLE`), handed back under a dispatch up to the
+    /// unit's loss cap (`DispatchFault::ConnectionLost`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_connection_the_plugin_cut_itself_is_its_own_failure() {
+    async fn a_connection_lost_mid_statement_is_the_platforms() {
         let (_container, url, _db) = one_connection().await;
         migrate(&url).await;
         let sql = plugin_sql(&url).await;
-        let call = crate::plugin_db::SqlCall::default();
-        let answer = sql
-            .execute(
-                "p",
-                &call,
-                Statement::from_string(
+        let running = tokio::spawn({
+            let sql = sql.clone();
+            async move {
+                sql.execute(
+                    "p",
+                    &crate::plugin_db::SqlCall::default(),
+                    Statement::from_string(DbBackend::Postgres, "SELECT pg_sleep(30)"),
+                )
+                .await
+            }
+        });
+        let observer: DatabaseConnection = Database::connect(&url).await.expect("connect").into();
+        // End the statement's backend from outside, as a restart would.
+        loop {
+            let ended = observer
+                .query_one_raw(Statement::from_string(
                     DbBackend::Postgres,
-                    "SELECT pg_terminate_backend(pg_backend_pid())",
-                ),
-            )
-            .await;
-        let lost = match answer {
+                    "SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) \
+                       FROM pg_stat_activity \
+                      WHERE state = 'active' AND query = 'SELECT pg_sleep(30)'",
+                ))
+                .await
+                .expect("terminate")
+                .expect("row")
+                .try_get_by_index::<i64>(0)
+                .expect("count");
+            if ended > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let lost = match running.await.expect("joined") {
             Err(lost @ crate::plugin_db::Unavailable::Outage(common::db::Outage::Lost, _)) => lost,
-            other => panic!("the cut reads as a lost database: {other:?}"),
+            other => panic!("the loss reads as a lost database: {other:?}"),
         };
         let confirmed = tokio::task::spawn_blocking({
             let pools = sql.pools.clone();
@@ -1795,10 +1829,10 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(confirmed, crate::plugin_db::Unavailable::Dropped(_)),
+            matches!(confirmed, crate::plugin_db::Unavailable::ConnectionLost(_)),
             "{confirmed}"
         );
-        assert_eq!(Unanswered::of(&confirmed), Unanswered::Itself);
+        assert_eq!(Unanswered::of(&confirmed), Unanswered::ConnectionLost);
     }
 
     /// A plugin's table `t` and an observer counting the statements that

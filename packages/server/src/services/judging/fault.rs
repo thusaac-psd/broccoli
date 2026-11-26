@@ -43,6 +43,13 @@ pub enum DispatchFault {
     /// that waits for a connection while its own call already holds one is
     /// failing on its own: that is the plugin's error, never this fault.
     SqlContended,
+    /// A plugin SQL connection the dispatch's plugins ran on was lost while
+    /// the host database answers (a fast restart, a failover, a connection
+    /// reaper): the platform's, so it hands back, but only `LOSS_HANDBACKS`
+    /// times per unit, since a plugin can also end its own backend by SQL
+    /// the guard cannot read; after that it is a judging failure, within the
+    /// submission's retry budget.
+    ConnectionLost,
     /// The problem's checker program failed (crashed, was killed by a
     /// signal, exited with a code its format gives no meaning), as its
     /// checker plugin reported through `CheckerVerdict::checker_failure`.
@@ -62,6 +69,7 @@ impl DispatchFault {
             Self::NotLoaded => HostCode::NoProvider,
             Self::DatabaseUnavailable => HostCode::DatabaseUnavailable,
             Self::SqlContended => HostCode::DatabaseBusy,
+            Self::ConnectionLost => HostCode::DatabaseUnavailable,
             Self::CheckerFailed => HostCode::CheckerFailed,
             Self::ProblemFailed => HostCode::ProblemFailed,
         }
@@ -172,6 +180,53 @@ fn loses(fault: DispatchFault) -> bool {
 /// (`contended_handbacks`), so it holds across replicas and restarts.
 pub(crate) const CONTENTION_HANDBACKS: i32 = 5;
 
+/// How many times one unit's attempt is handed back for a lost plugin SQL
+/// connection ([`DispatchFault::ConnectionLost`]); counted on the unit's row
+/// (`lost_handbacks`), so it holds across replicas and restarts. A restart
+/// or failover costs a unit one, so the cap is far above what an incident
+/// spends, and stops only a unit whose own plugin ends its connection again
+/// and again.
+pub(crate) const LOSS_HANDBACKS: i32 = 5;
+
+/// A cause of hand-back a unit's own plugins can bring about, and so handed
+/// back only up to a cap per unit, counted on the unit's row: past it, the
+/// failure is the submission's ([`SystemErrorClass::Capped`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HandBackCap {
+    /// No plugin SQL connection was free ([`DispatchFault::SqlContended`]).
+    Contention,
+    /// A plugin SQL connection was lost while the host database answers
+    /// ([`DispatchFault::ConnectionLost`]).
+    ConnectionLost,
+}
+
+impl HandBackCap {
+    /// The dispatch fault this cap counts.
+    #[cfg(test)]
+    pub(crate) fn fault(self) -> DispatchFault {
+        match self {
+            Self::Contention => DispatchFault::SqlContended,
+            Self::ConnectionLost => DispatchFault::ConnectionLost,
+        }
+    }
+
+    /// How many hand-backs a unit has for this cause.
+    pub(crate) fn limit(self) -> i32 {
+        match self {
+            Self::Contention => CONTENTION_HANDBACKS,
+            Self::ConnectionLost => LOSS_HANDBACKS,
+        }
+    }
+
+    /// The unit column counting them.
+    pub(crate) fn column(self) -> &'static str {
+        match self {
+            Self::Contention => "contended_handbacks",
+            Self::ConnectionLost => "lost_handbacks",
+        }
+    }
+}
+
 /// What becomes of a unit whose attempt ended in a system error. The class is
 /// decided where the failure is observed (a dispatch fault, the dispatcher's
 /// own failure, a plugin's write) and recorded with it, never read back from
@@ -189,11 +244,11 @@ pub(crate) enum SystemErrorClass {
     /// its platform tools takes no work, so the next attempt goes to one that
     /// has them.
     HandBack,
-    /// The attempt met contention for plugin SQL connections: handed back
-    /// like [`Self::HandBack`] while the unit has handed back fewer than
-    /// [`CONTENTION_HANDBACKS`] times for it, a [`Self::Judging`] failure
-    /// after that (`judging::fail_dispatch`).
-    Contended,
+    /// The attempt met a cause its own plugins can bring about (see
+    /// [`HandBackCap`]): handed back like [`Self::HandBack`] while the unit
+    /// has handed back fewer than the cause's limit times for it, a
+    /// [`Self::Judging`] failure after that (`judging::fail_dispatch`).
+    Capped(HandBackCap),
     /// A failure every attempt repeats: the contest plugin refused the
     /// submission or found the problem cannot be judged, or the problem's
     /// checker fails. It stands at once (`error_stands`).
@@ -202,9 +257,9 @@ pub(crate) enum SystemErrorClass {
 
 impl SystemErrorClass {
     /// Whether the attempt it ends is handed back rather than finalized
-    /// (for [`Self::Contended`], while its cap allows).
+    /// (for [`Self::Capped`], while its cap allows).
     pub(crate) fn hands_back(self) -> bool {
-        matches!(self, Self::HandBack | Self::Contended)
+        matches!(self, Self::HandBack | Self::Capped(_))
     }
 
     pub(crate) fn of_fault(fault: DispatchFault) -> Self {
@@ -217,7 +272,8 @@ impl SystemErrorClass {
             )
             | DispatchFault::NotLoadedHere
             | DispatchFault::DatabaseUnavailable => Self::HandBack,
-            DispatchFault::SqlContended => Self::Contended,
+            DispatchFault::SqlContended => Self::Capped(HandBackCap::Contention),
+            DispatchFault::ConnectionLost => Self::Capped(HandBackCap::ConnectionLost),
             DispatchFault::NotLoaded
             | DispatchFault::CheckerFailed
             | DispatchFault::ProblemFailed => Self::Stands,

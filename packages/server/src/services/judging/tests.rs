@@ -1531,22 +1531,53 @@ async fn work_handed_back_for_an_outage_waits_before_it_is_claimed_again() {
     assert_eq!(claimable(&db).await, 1, "claimed once it passed");
 }
 
-/// An attempt that found no plugin SQL connection free (contention with the
-/// work beside it) is handed back spending nothing, but only
-/// `CONTENTION_HANDBACKS` times per unit, counted on its row: the next one
-/// is a failure judging the submission, so contention that never clears
-/// cannot hand a unit back forever.
+/// An attempt the platform loses in a way a unit's own plugins can cause is
+/// handed back spending nothing, but only up to its cap per unit, counted on
+/// its row: no plugin SQL connection free (contention with the work beside
+/// it, `CONTENTION_HANDBACKS`), or its plugin SQL connection lost while the
+/// host database answers (a restart, a failover, a reaper, or a plugin
+/// ending its own backend by a route the guard misses, `LOSS_HANDBACKS`).
+/// The next one is a failure judging the submission, so neither can hand a
+/// unit back forever, and each cap counts only its own cause.
 #[tokio::test]
-async fn a_contended_attempt_is_handed_back_only_up_to_its_cap() {
+async fn a_capped_attempt_is_handed_back_only_up_to_its_cap() {
+    use super::fault::HandBackCap;
     let (_pg, db) = crate::test_support::postgres().await;
-    new_submission(&db).await;
-    let contended = || {
-        DispatchFailure::from(super::fault::Recorded {
-            fault: DispatchFault::SqlContended,
-            message: "no plugin SQL connection was free".into(),
-        })
-    };
-    for handed_back in 1..=super::fault::CONTENTION_HANDBACKS {
+    for (cap, code) in [
+        (HandBackCap::Contention, HostCode::DatabaseBusy),
+        (HandBackCap::ConnectionLost, HostCode::DatabaseUnavailable),
+    ] {
+        new_submission(&db).await;
+        let failure = || {
+            DispatchFailure::from(super::fault::Recorded {
+                fault: cap.fault(),
+                message: "the plugin's SQL did not run".into(),
+            })
+        };
+        let counted = |j: &crate::entity::submission_judgement::Model| match cap {
+            HandBackCap::Contention => (j.contended_handbacks, j.lost_handbacks),
+            HandBackCap::ConnectionLost => (j.lost_handbacks, j.contended_handbacks),
+        };
+        for handed_back in 1..=cap.limit() {
+            let claimed = claim_one(&db, "srv").await;
+            assert_eq!(
+                fail_dispatch(
+                    &db,
+                    Unit::Judgement,
+                    claimed.judgement.id,
+                    claimed.judgement.judge_epoch,
+                    &failure(),
+                )
+                .await
+                .unwrap(),
+                DispatchFailed::HandedBack,
+                "{cap:?} hand-back {handed_back}"
+            );
+            let j = judgement(&db, claimed.judgement.id).await;
+            assert_eq!(j.status, SubmissionStatus::Queued);
+            assert_eq!(counted(&j), (handed_back, 0), "{cap:?}");
+            exec(&db, "UPDATE submission_judgement SET queued_at = NOW()").await;
+        }
         let claimed = claim_one(&db, "srv").await;
         assert_eq!(
             fail_dispatch(
@@ -1554,39 +1585,18 @@ async fn a_contended_attempt_is_handed_back_only_up_to_its_cap() {
                 Unit::Judgement,
                 claimed.judgement.id,
                 claimed.judgement.judge_epoch,
-                &contended(),
+                &failure(),
             )
             .await
             .unwrap(),
-            DispatchFailed::HandedBack,
-            "hand-back {handed_back}"
+            DispatchFailed::SystemError,
+            "{cap:?}: past the cap the failure is the submission's"
         );
         let j = judgement(&db, claimed.judgement.id).await;
-        assert_eq!(j.status, SubmissionStatus::Queued);
-        assert_eq!(j.contended_handbacks, handed_back);
-        exec(&db, "UPDATE submission_judgement SET queued_at = NOW()").await;
+        assert_eq!(j.status, SubmissionStatus::SystemError);
+        assert_eq!(j.error_code.as_deref(), Some(code.as_str()), "{cap:?}");
+        assert!(!j.error_stands, "within its retry budget");
     }
-    let claimed = claim_one(&db, "srv").await;
-    assert_eq!(
-        fail_dispatch(
-            &db,
-            Unit::Judgement,
-            claimed.judgement.id,
-            claimed.judgement.judge_epoch,
-            &contended(),
-        )
-        .await
-        .unwrap(),
-        DispatchFailed::SystemError,
-        "past the cap the failure is the submission's"
-    );
-    let j = judgement(&db, claimed.judgement.id).await;
-    assert_eq!(j.status, SubmissionStatus::SystemError);
-    assert_eq!(
-        j.error_code.as_deref(),
-        Some(HostCode::DatabaseBusy.as_str())
-    );
-    assert!(!j.error_stands, "within its retry budget");
 }
 
 /// An attempt the platform lost (the queue was unreachable or lost an

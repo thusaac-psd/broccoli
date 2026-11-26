@@ -141,11 +141,16 @@ pub enum Unavailable {
     Unprovisioned(String),
     #[error("the database cannot serve the statement: {1}")]
     Outage(common::db::Outage, String),
-    /// The plugin's connection was cut while the host database answers (a
-    /// backend terminated under it): the plugin's own failure, not an outage
-    /// ([`PluginSqlPools::confirmed`]).
-    #[error("the plugin's database connection was cut while the database answers: {0}")]
-    Dropped(String),
+    /// The plugin's connection was lost while the host database answers (a
+    /// fast restart, a failover or a connection reaper ended its backend):
+    /// the platform's, but not an outage of the host database
+    /// ([`PluginSqlPools::confirmed`]), so under a dispatch it hands the
+    /// attempt back only up to the unit's loss cap
+    /// (`judging::fault::HandBackCap::ConnectionLost`). The cap bounds the
+    /// one route a plugin has to end its own backend, dynamic SQL the guard
+    /// cannot read.
+    #[error("the plugin's database connection was lost while the database answers: {0}")]
+    ConnectionLost(String),
 }
 
 impl Unavailable {
@@ -360,11 +365,10 @@ impl PluginSqlPools {
 
     /// `e` as the platform takes it: a lost database a plugin's statement met
     /// is confirmed with one probe on the host's own pool, and if the host
-    /// database answers, the plugin's connection was cut under it (a backend
-    /// it or its role's sibling ended), its own failure
-    /// ([`Unavailable::Dropped`]) and never an outage. A host outage stays
-    /// one. Blocks on the probe; runs where the host function already
-    /// blocks on its statement.
+    /// database answers, only the plugin's connection was lost
+    /// ([`Unavailable::ConnectionLost`]), handed back up to a cap rather
+    /// than without limit. A host outage stays one. Blocks on the probe;
+    /// runs where the host function already blocks on its statement.
     pub fn confirmed(&self, e: Unavailable) -> Unavailable {
         let Unavailable::Outage(common::db::Outage::Lost, message) = e else {
             return e;
@@ -376,7 +380,7 @@ impl PluginSqlPools {
                 .is_ok_and(|answer| answer.is_ok())
         });
         if answers {
-            Unavailable::Dropped(message)
+            Unavailable::ConnectionLost(message)
         } else {
             Unavailable::Outage(common::db::Outage::Lost, message)
         }
