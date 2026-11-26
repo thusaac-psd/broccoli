@@ -582,6 +582,9 @@ const ROUTES: [string, RegExp, Handler][] = [
           breakdown: { unread: 0, pending: 0 },
         },
       ],
+      servers: [
+        { server_id: 'server-8f3a2c1d9e7b4a6f', ready: true, missing: [] },
+      ],
       submissions_in_progress: 0,
       submissions_queued: 3,
       submissions_parked: 0,
