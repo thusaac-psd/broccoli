@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import type { PluginOutage } from '@broccoli/web-sdk/submission';
+
 import {
   languagesClosed,
   problemClosed,
@@ -37,13 +39,30 @@ test('a disabled evaluator closes submitting in a contest and in practice', () =
   }
 });
 
-test("a practice problem's contest type out of reach here is unavailable", () => {
-  const problem = { plugin_outage: { state: 'unavailable' } } as const;
-  assert.deepEqual(submitClosure('practice', null, problem), {
-    kind: 'unavailable',
-  });
-  // Under a contest the problem's practice type does not decide.
-  assert.equal(submitClosure('contest', null, problem), null);
+// Every state a practice problem's contest type can be out in: a state the
+// server adds fails to compile here until it is listed.
+const PRACTICE_OUTAGES = {
+  disabled: { state: 'disabled', plugin_id: 'icpc' },
+  not_loaded: { state: 'not_loaded', plugin_id: 'icpc' },
+  not_loaded_here: { state: 'not_loaded_here', plugin_id: 'icpc' },
+  unavailable: { state: 'unavailable' },
+} as const satisfies {
+  [S in PluginOutage['state']]: PluginOutage & { state: S };
+};
+
+test("a practice problem's contest type out in any state closes it, and is asked for again", () => {
+  for (const outage of Object.values(PRACTICE_OUTAGES)) {
+    const problem = { plugin_outage: outage };
+    assert.deepEqual(
+      submitClosure('practice', null, problem),
+      { kind: 'practice', outage },
+      outage.state,
+    );
+    assert.equal(problemClosed('practice', problem), true, outage.state);
+    // Under a contest the problem's practice type does not decide.
+    assert.equal(submitClosure('contest', null, problem), null, outage.state);
+    assert.equal(problemClosed('contest', problem), false, outage.state);
+  }
 });
 
 test('nothing closes submitting while every plugin it needs serves', () => {

@@ -440,3 +440,36 @@ test('a problem page asks for the registries once', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Submit' })).toBeVisible();
   expect(asked()).toBe(1);
 });
+
+// A practice problem whose contest type is out in any state says so, offers
+// no Submit, and is asked for again until it is back: never a Submit the
+// server refuses with a toast.
+test('a practice problem whose contest plugin is not loaded here says so and reopens once it is', async ({
+  page,
+}) => {
+  await page.clock.install({ time: NOW });
+  await mockApi(page, 'contestant');
+  let served = false;
+  await answerGets(page, /\/api\/v1\/problems\/1(\?|$)/, () =>
+    served
+      ? problem(1)
+      : {
+          ...problem(1),
+          plugin_outage: { state: 'not_loaded_here', plugin_id: 'icpc' },
+        },
+  );
+  await page.goto('/problems/1?tab=coding');
+  await expect(
+    page.getByText(
+      'Submitting is unavailable here: its contest plugin icpc is not loaded on this server. Try again in a moment, on a server that serves it.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Submit' })).toHaveCount(0);
+
+  served = true;
+  await runClockUntil(page, () =>
+    expect(page.getByRole('button', { name: 'Submit' })).toBeVisible({
+      timeout: 500,
+    }),
+  );
+});

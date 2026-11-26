@@ -3,7 +3,10 @@ import { closedByText, type PluginOutage } from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
 import { PlugZap } from 'lucide-react';
 
-import type { SubmitClosure } from '@/features/problem/utils/submit-closure';
+import {
+  OUTAGE_TEXT,
+  type SubmitClosure,
+} from '@/features/problem/utils/submit-closure';
 
 function Notice({ text, className }: { text: string; className?: string }) {
   return (
@@ -23,37 +26,28 @@ function Notice({ text, className }: { text: string; className?: string }) {
 /**
  * What a contest shows while the plugin that provides its contest type
  * cannot serve it (`plugin_outage`): its results are unavailable and its
- * submissions refused. A disabled plugin, one loaded on no server, or one
- * this server lacks while another serves it, is named (`pluginName`), so whoever can bring it back knows which. Renders
- * nothing otherwise.
+ * submissions refused. In practice (`scope`), what a problem shows while its
+ * practice contest type cannot: its submissions refused. A disabled plugin,
+ * one loaded on no server, or one this server lacks while another serves it,
+ * is named (`pluginName`), so whoever can bring it back knows which.
+ * Renders nothing otherwise.
  */
 export function PluginOutageNotice({
   outage,
+  scope = 'contest',
   className,
 }: {
   outage: PluginOutage | null | undefined;
+  scope?: 'contest' | 'practice';
   className?: string;
 }) {
   const { t, lookup } = useTranslation();
   if (!outage) return null;
-  const text = (() => {
-    switch (outage.state) {
-      case 'disabled':
-        return t('contests.pluginOutage.disabled', {
-          plugin: pluginName(lookup, outage.plugin_id),
-        });
-      case 'not_loaded':
-        return t('contests.pluginOutage.notLoaded', {
-          plugin: pluginName(lookup, outage.plugin_id),
-        });
-      case 'not_loaded_here':
-        return t('contests.pluginOutage.notLoadedHere', {
-          plugin: pluginName(lookup, outage.plugin_id),
-        });
-      case 'unavailable':
-        return t('contests.pluginOutage.unavailable');
-    }
-  })();
+  const key = OUTAGE_TEXT[scope][outage.state];
+  const text =
+    outage.state === 'unavailable'
+      ? t(key)
+      : t(key, { plugin: pluginName(lookup, outage.plugin_id) });
   return <Notice text={text} className={className} />;
 }
 
@@ -83,10 +77,11 @@ export function SubmitClosureNotice({
           className={className}
         />
       );
-    case 'unavailable':
+    case 'practice':
       return (
-        <Notice
-          text={t('problem.pluginOutage.unavailable')}
+        <PluginOutageNotice
+          outage={closure.outage}
+          scope="practice"
           className={className}
         />
       );
