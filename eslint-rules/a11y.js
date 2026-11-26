@@ -10,13 +10,7 @@
  * are icons; `{t('key')}` is text).
  */
 
-const CONTROLS = new Set([
-  'Button',
-  'button',
-  'a',
-  'Link',
-  'NavLink',
-]);
+const CONTROLS = new Set(['Button', 'button', 'a', 'Link', 'NavLink']);
 const LABEL_ATTRS = new Set(['aria-label', 'aria-labelledby']);
 
 function elementName(node) {

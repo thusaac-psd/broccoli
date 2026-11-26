@@ -71,10 +71,31 @@ const STATE = new Set([
 ]);
 
 /**
- * Whether `node` reads the query's state (`query.isError`), or hands the
- * query on (`return query`, `return { query }`) to a caller that does.
+ * Whether the value of `node` reaches anything: a condition, a render, a
+ * call, a return, or a name that is read. `void x`, a bare `x;` and a name
+ * no one reads drop it, so a state read there shows no failure.
  */
-function handlesState(node) {
+function valueUsed(context, node) {
+  const parent = node.parent;
+  if (parent.type === 'ExpressionStatement') return false;
+  if (parent.type === 'UnaryExpression' && parent.operator === 'void') {
+    return false;
+  }
+  if (parent.type === 'VariableDeclarator' && parent.init === node) {
+    if (parent.id.type !== 'Identifier') return true;
+    return context.sourceCode
+      .getDeclaredVariables(parent)
+      .some((v) => v.references.some((ref) => ref.isRead()));
+  }
+  return true;
+}
+
+/**
+ * Whether `node` reads the query's state (`query.isError`) where its value
+ * is used (`valueUsed`), or hands the query on (`return query`, `return {
+ * query }`) to a caller that does.
+ */
+function handlesState(context, node) {
   const parent = node.parent;
   if (
     parent.type === 'MemberExpression' &&
@@ -82,7 +103,7 @@ function handlesState(node) {
     !parent.computed &&
     STATE.has(parent.property.name)
   ) {
-    return true;
+    return valueUsed(context, chainTop(parent));
   }
   if (parent.type === 'ReturnStatement') return true;
   return (
@@ -132,22 +153,33 @@ function isNullish(node) {
 /**
  * Whether `node`'s value, read through any member chain, falls back:
  * `x ?? []`, `x?.items || []`, `x ? f(x) : []`, `!x ? [] : x`,
- * `x === undefined ? [] : x`. `x ?? null` substitutes nothing and is not
- * one.
+ * `x === undefined ? [] : x`, `Array.isArray(x) ? x : []`, an early return
+ * (`if (!x) return EMPTY`), and any of these after a nullish pass-through
+ * (`(x ?? null) ?? []`). `x ?? null` alone substitutes nothing and is not
+ * one, nor is an early return of nothing (`if (!x) return null`).
  */
 function fallsBack(node) {
-  const top = chainTop(node);
+  let top = chainTop(node);
+  // `(x ?? null) ?? []`: a nullish pass-through, then the fallback.
+  while (
+    top.parent?.type === 'LogicalExpression' &&
+    (top.parent.operator === '??' || top.parent.operator === '||') &&
+    top.parent.left === top &&
+    isNullish(top.parent.right)
+  ) {
+    top = top.parent;
+  }
   const parent = top.parent;
   if (
     parent?.type === 'LogicalExpression' &&
     (parent.operator === '??' || parent.operator === '||') &&
     parent.left === top
   ) {
-    // `x ?? undefined` substitutes nothing: it only says absent one way.
-    return !isNullish(parent.right);
+    return true;
   }
   let test = top;
-  if (parent?.type === 'UnaryExpression' && parent.operator === '!') {
+  // `Array.isArray(x)`, or any guard the read is handed to.
+  if (parent?.type === 'CallExpression' && parent.arguments.includes(top)) {
     test = parent;
   } else if (
     parent?.type === 'BinaryExpression' &&
@@ -156,9 +188,30 @@ function fallsBack(node) {
   ) {
     test = parent;
   }
+  if (test.parent?.type === 'UnaryExpression' && test.parent.operator === '!') {
+    test = test.parent;
+  }
+  const holder = test.parent;
+  if (holder?.type === 'ConditionalExpression' && holder.test === test) {
+    return true;
+  }
+  // `if (!x) return EMPTY`: an early return of anything but nothing.
   return (
-    test.parent?.type === 'ConditionalExpression' && test.parent.test === test
+    holder?.type === 'IfStatement' &&
+    holder.test === test &&
+    returnsSomething(holder.consequent)
   );
+}
+
+/** Whether `statement` returns a value other than null or undefined. */
+function returnsSomething(statement) {
+  const returned =
+    statement.type === 'BlockStatement'
+      ? statement.body.find((s) => s.type === 'ReturnStatement')
+      : statement.type === 'ReturnStatement'
+        ? statement
+        : null;
+  return !!returned?.argument && !isNullish(returned.argument);
 }
 
 /** The `x.data` read whose object is `node`, if it is one. */
@@ -267,7 +320,9 @@ function create(context) {
     return variable.references.some((ref) => {
       let at = ref.identifier;
       for (;;) {
-        if (text(at) === want) return rendersState(at) || handlesState(at);
+        if (text(at) === want) {
+          return rendersState(at) || handlesState(context, at);
+        }
         const parent = at.parent;
         if (
           (parent?.type === 'MemberExpression' && parent.object === at) ||
@@ -315,10 +370,10 @@ function create(context) {
   /**
    * `{ data: x, ...rest } = <query>`: the `data` binding reported where it
    * is read with a fallback, or the default it is given, unless the pattern
-   * also takes the query's state.
+   * also takes the query's state and reads it.
    */
   function checkPattern(pattern) {
-    if (takesState(pattern)) return;
+    if (takesUsedState(pattern)) return;
     for (const property of pattern.properties) {
       if (
         property.type !== 'Property' ||
@@ -335,6 +390,24 @@ function create(context) {
     }
   }
 
+  /** Whether `pattern` takes the query's state into a name that is read. */
+  function takesUsedState(pattern) {
+    return pattern.properties.some((p) => {
+      if (
+        p.type !== 'Property' ||
+        p.key.type !== 'Identifier' ||
+        !STATE.has(p.key.name)
+      ) {
+        return false;
+      }
+      if (p.value.type !== 'Identifier') return true;
+      const variable = declaredIn(p.value).find((v) =>
+        v.identifiers.includes(p.value),
+      );
+      return !!variable?.references.some((ref) => ref.isRead());
+    });
+  }
+
   return {
     // A destructure of a query: `const { data } = q`, `[{ data }] = qs`,
     // a component's `{ query: { data } }`.
@@ -349,10 +422,19 @@ function create(context) {
         return;
       checkPattern(node);
     },
-    // `const rows = q.data`: an alias of the data is read as the data.
+    // `const rows = q.data`: an alias of the data, also through a nullish
+    // pass-through, is read as the data.
     VariableDeclarator(node) {
       if (node.id.type !== 'Identifier' || !node.init) return;
-      const init = unwrap(node.init);
+      // `q.data ?? null` passes the data through as it is.
+      let init = unwrap(node.init);
+      while (
+        init.type === 'LogicalExpression' &&
+        init.operator === '??' &&
+        isNullish(init.right)
+      ) {
+        init = unwrap(init.left);
+      }
       if (
         init.type !== 'MemberExpression' ||
         dataOf(init.object) !== init ||
