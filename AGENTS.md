@@ -324,8 +324,11 @@ binaries warn about every key they do not read.
   paths refuse it (`accepting_handler`), and it resumes when a provider is
   enabled. A replica takes a unit only when it has every key's fleet-wide
   provider loaded (`providers::runs_here`, local registrations from
-  `Loaded::here`). A provider enabled but loaded on no live replica parks the
-  work the same way (`ClosedReason::NotLoaded`; the submit paths answer
+  `Loaded::here`); taking lapsed or stuck work back to the queue
+  (`reclaim_abandoned`) reads no local loads, so any live replica recovers a
+  dead owner's work, and work no live replica can run waits parked, spending no
+  retry. A provider enabled but loaded on no live replica parks the work the
+  same way (`ClosedReason::NotLoaded`; the submit paths answer
   `PLUGIN_NOT_LOADED`), never another provider; only a key no enabled plugin
   provides is taken without its plugin, to stand as `NO_PROVIDER`. A plugin
   missing at dispatch while an enabled plugin provides the key hands the attempt

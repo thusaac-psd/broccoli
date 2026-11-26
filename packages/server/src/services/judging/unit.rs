@@ -1022,25 +1022,30 @@ impl std::ops::AddAssign for Reclaimed {
     }
 }
 
-/// Takes over every in-flight unit of `unit` that `abandoned` selects and
-/// this replica can judge, `batch` rows per transaction: each with dispatch
-/// retries left is requeued (spending one), each without is finalized as
-/// `SystemError` and dead-lettered. Batches repeat until one comes back
-/// short, so a dead server's whole in-flight set is recovered in one scan
-/// however large it is. Every batch takes its rows out of flight, so the
-/// loop ends.
+/// Takes over every in-flight unit of `unit` that `abandoned` selects,
+/// `batch` rows per transaction, whatever this replica has loaded: taking a
+/// unit back to the queue runs nothing, and the claim, not the reclaim,
+/// leaves work to a replica that runs it (`Unit::runs_here`). So work whose
+/// owner died is recovered even when no live replica can run it. A unit that
+/// is not runnable now (its provider disabled, or loaded on no live replica,
+/// as when the dead owner was its only one) is handed back spending nothing
+/// and waits parked; one that is runnable with dispatch retries left is
+/// requeued spending one, and one without is finalized as `SystemError` and
+/// dead-lettered. Every replica decides a unit alike, since all of it reads
+/// the fleet-wide tables. Batches repeat until one comes back short, so a
+/// dead server's whole in-flight set is recovered in one scan however large
+/// it is. Every batch takes its rows out of flight, so the loop ends.
 pub(crate) async fn reclaim_abandoned(
     db: &DatabaseConnection,
     unit: Unit,
     abandoned: Abandoned,
     budget: RetryBudget,
     batch: u32,
-    local: &Loaded,
 ) -> Result<Reclaimed, DbErr> {
     let batch = batch.max(1);
     let mut total = Reclaimed::default();
     loop {
-        let (taken, reclaimed) = reclaim_batch(db, unit, abandoned, budget, batch, local).await?;
+        let (taken, reclaimed) = reclaim_batch(db, unit, abandoned, budget, batch).await?;
         total += reclaimed;
         if taken < batch as usize {
             return Ok(total);
@@ -1055,16 +1060,13 @@ async fn reclaim_batch(
     abandoned: Abandoned,
     budget: RetryBudget,
     limit: u32,
-    local: &Loaded,
 ) -> Result<(usize, Reclaimed), DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let predicate = abandoned.predicate(&mut b);
-    let local = b.bind(serde_json::to_value(local).expect("loaded keys serialize"));
     let filter = format!(
-        "u.status IN {in_flight} AND {predicate} AND {handled}",
+        "u.status IN {in_flight} AND {predicate}",
         in_flight = StatusPhase::InFlight.sql_list(),
-        handled = unit.runs_here(&local),
     );
     let picked = pick(&txn, unit, b, filter, Some(limit)).await?;
     let taken = picked.len();

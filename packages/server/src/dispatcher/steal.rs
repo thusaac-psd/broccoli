@@ -41,19 +41,17 @@ pub async fn run(
     }
 }
 
-/// One scan over both units. Leaves work to a replica that can judge it
-/// (see `providers::runs_here`).
+/// One scan over both units, whatever this replica has loaded: the claim
+/// leaves the requeued work to a replica that runs it.
 async fn scan_once(
     state: &AppState,
     abandoned: Abandoned,
     budget: RetryBudget,
     batch_size: u32,
 ) -> anyhow::Result<()> {
-    let local = crate::providers::Loaded::here(&state.registries).await;
     for unit in [Unit::Judgement, Unit::CodeRun] {
         let reclaimed =
-            judging::reclaim_abandoned(&state.db, unit, abandoned, budget, batch_size, &local)
-                .await?;
+            judging::reclaim_abandoned(&state.db, unit, abandoned, budget, batch_size).await?;
         if reclaimed.requeued > 0 || reclaimed.exhausted > 0 {
             info!(
                 ?unit,

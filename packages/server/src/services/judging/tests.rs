@@ -461,7 +461,6 @@ async fn an_immediate_rejudge_queues_both_rows_with_no_owner() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 0 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -496,7 +495,6 @@ async fn lease_refresh_covers_a_current_judgement_beside_a_newer_deferred_one() 
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -538,7 +536,6 @@ async fn lease_refresh_covers_only_live_dispatches() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -571,7 +568,6 @@ async fn a_lapsed_lease_requeues_under_a_new_epoch_and_spends_a_retry() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -625,7 +621,6 @@ async fn one_reclaim_takes_over_every_lapsed_unit_whatever_the_batch_size() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         3,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -647,11 +642,61 @@ async fn a_live_lease_is_left_alone() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
     assert_eq!(reclaimed, Reclaimed::default());
+}
+
+/// Work whose owner died is reclaimed by any live replica once its lease
+/// lapses, whether or not that replica can run it: here the dead owner was
+/// the only replica with the unit's evaluator loaded, and a replica with
+/// nothing loaded takes the unit back to `Queued`. Its provider is loaded on
+/// no live replica, so the unit is parked, not abandoned: no dispatch retry
+/// is spent, and nothing claims it until a replica loads its provider.
+#[tokio::test]
+async fn work_whose_dead_owner_was_its_only_provider_is_reclaimed_and_parked() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, _) = new_submission(&db).await;
+    evaluator(&db, true).await;
+    let claimed = claim_one(&db, "dead").await;
+    exec(
+        &db,
+        "UPDATE submission_judgement SET lease_heartbeat_at = NOW() - INTERVAL '2 minutes'",
+    )
+    .await;
+    exec(
+        &db,
+        "UPDATE plugin_replica SET heartbeat_at = NOW() - INTERVAL '2 minutes' \
+          WHERE server_id = 'dead'",
+    )
+    .await;
+    live(&db, "srv", NO_TYPES).await;
+
+    let reclaimed = reclaim_abandoned(
+        &db,
+        Unit::Judgement,
+        Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
+        RetryBudget::new(5),
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reclaimed.requeued, 1, "{reclaimed:?}");
+    let j = judgement(&db, claimed.judgement.id).await;
+    assert_eq!(j.status, SubmissionStatus::Queued);
+    assert_eq!(j.owner_server_id, None);
+    assert_eq!(j.dispatch_retries, 0, "a parked unit spends no retry");
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::Queued);
+
+    let nothing = claim_judgements(&db, "srv", TEN, NO_TYPES).await.unwrap();
+    assert_eq!(nothing.units.len(), 0, "parked while loaded nowhere");
+    let with_evaluator = every_enabled(&db).await;
+    peer(&db, &with_evaluator).await;
+    let resumed = claim_judgements(&db, "peer", TEN, &with_evaluator)
+        .await
+        .unwrap();
+    assert_eq!(resumed.units.len(), 1, "it resumes once a replica loads it");
 }
 
 #[tokio::test]
@@ -672,7 +717,6 @@ async fn a_spent_dispatch_budget_finalizes_and_dead_letters_once_per_submission(
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(2),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -720,16 +764,9 @@ async fn a_dispatch_past_the_in_flight_cap_is_stuck_even_with_a_fresh_lease() {
         max_inflight_secs: cap,
     };
 
-    let ignored = reclaim_abandoned(
-        &db,
-        Unit::Judgement,
-        stuck(None),
-        RetryBudget::new(5),
-        10,
-        NO_TYPES,
-    )
-    .await
-    .unwrap();
+    let ignored = reclaim_abandoned(&db, Unit::Judgement, stuck(None), RetryBudget::new(5), 10)
+        .await
+        .unwrap();
     assert_eq!(ignored, Reclaimed::default(), "no cap, fresh heartbeat");
 
     let reclaimed = reclaim_abandoned(
@@ -738,7 +775,6 @@ async fn a_dispatch_past_the_in_flight_cap_is_stuck_even_with_a_fresh_lease() {
         stuck(Some(3600)),
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -1015,7 +1051,6 @@ async fn a_code_run_follows_the_same_claim_and_requeue_rules() {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(5),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap();
@@ -1062,7 +1097,6 @@ async fn steal(db: &DatabaseConnection) -> Reclaimed {
         Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
         RetryBudget::new(0),
         10,
-        NO_TYPES,
     )
     .await
     .unwrap()

@@ -45,7 +45,14 @@ recovery is a requeue:
 One lease-steal or stuck-job scan takes over everything it selects: it works
 in transactions of `steal_batch_size` rows (256 for the detector) and repeats
 them until one comes back short, so a dead server's whole in-flight set is
-requeued within one scan interval however large it is.
+requeued within one scan interval however large it is. Any live replica takes
+lapsed work back, whatever it has loaded: requeuing runs nothing, and the
+claim leaves the work to a replica that runs it. Work whose dead owner was the
+only replica with its provider loaded is therefore recovered too: its
+provider is loaded on no live replica, so it is handed back spending no
+dispatch retry and waits parked (`parked_by`, `reason: not_loaded`) until a
+replica loads it. Work that is runnable elsewhere spends one dispatch retry,
+so a unit that keeps killing the servers that take it runs out of them.
 
 Every lease age is compared on the database clock: claims and refreshes stamp
 `NOW()`, and the scans compare against `NOW()`.
@@ -115,8 +122,8 @@ where a disabled provider answers `PLUGIN_DISABLED`; both name the plugin in
 replica that loads the provider is live (`providers::runnable`,
 `PluginLifecycle::closed_by`, which reads the live replicas' loads as of the
 last reconcile). An administrator who wants the next provider to take the
-key disables the first. The claim, the system-error retry, the steal and
-the stuck detector take a unit only when this replica has every key's
+key disables the first. The claim and the system-error retry take a unit
+only when this replica has every key's
 fleet-wide provider loaded (`Loaded::here`, read from its registries, so the
 check costs no round trip; `providers::runs_here`). Only a key no enabled
 plugin provides at all is taken by a replica without it, to fail visibly
