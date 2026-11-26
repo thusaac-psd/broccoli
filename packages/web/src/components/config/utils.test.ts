@@ -12,6 +12,7 @@ import {
   pathSteps,
   serverFieldErrors,
   setAtPath,
+  storedRef,
   validateAll,
   validateField,
   valueText,
@@ -312,4 +313,30 @@ test('a field path reads as its titles and its items by their key', () => {
     label: null,
     index: 1,
   });
+});
+
+test("a field's stored secret is its own item's, by the key it was saved under", () => {
+  const stored = markSaved(
+    {
+      stations: [
+        { name: 'alpha', token: { $secret: 'ra' } },
+        { name: 'beta', token: { $secret: 'rb' } },
+      ],
+    },
+    stations,
+  ) as { stations: Record<string, unknown>[] };
+  const [, beta] = stored.stations;
+  const moved = { stations: [{ ...beta, token: 'typed' }] };
+  assert.deepEqual(storedRef(stored, moved, ['stations', '0', 'token']), {
+    $secret: 'rb',
+  });
+  assert.equal(
+    storedRef(stored, { stations: [{ name: 'new', token: '' }] }, [
+      'stations',
+      '0',
+      'token',
+    ]),
+    null,
+    'an item added since the read has no stored secret',
+  );
 });

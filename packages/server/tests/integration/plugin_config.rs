@@ -367,6 +367,46 @@ mod secret_ref {
         );
     }
 
+    /// A secret stored without a ref (before refs were kept) gets one when
+    /// its plugin loads, so a save of the config as read keeps it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_secret_stored_without_a_ref_gets_one_its_save_keeps() {
+        use sea_orm::ConnectionTrait;
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("secret_ref_legacy", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        app.db
+            .execute_unprepared(&format!(
+                "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+                 VALUES ('problem', '{problem_id}', 'server-plugin:bundled', \
+                 '{{\"token\": \"legacy\"}}', 0, now())"
+            ))
+            .await
+            .unwrap();
+        let res = app
+            .post_with_token(
+                &routes::admin_plugin_reload("server-plugin"),
+                &json!({}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "bundled");
+        let read = app.get_with_token(&path, &admin).await;
+        let token = read.body["config"]["token"].clone();
+        assert!(
+            token["$secret"].as_str().is_some_and(|id| !id.is_empty()),
+            "the stored token reads as its ref: {}",
+            read.text
+        );
+        let (status, saved) = save(&app, &admin, &path, read.body["config"].clone()).await;
+        assert_eq!(status, 200, "{saved}");
+        assert_eq!(saved["config"]["token"], token, "kept");
+    }
+
     /// The print station case: an API client that deletes a station and adds
     /// one of the same name gets no old token back, whatever it sends.
     #[tokio::test]
@@ -782,6 +822,184 @@ mod lock_order {
             other.commit().await.unwrap();
             fired.await.unwrap();
         }
+    }
+}
+
+/// Every config route answers by one rule for a plugin this replica does
+/// not serve: a retryable 503 naming the plugin, `PLUGIN_NOT_LOADED_HERE`
+/// while another replica serves it and `PLUGIN_NOT_LOADED` while none does.
+/// Nothing is read, written or deleted by a schema this replica lacks; a
+/// list shows the stored rows of such a plugin withheld, with the code its
+/// routes answer, whose text names the plugin.
+mod not_served_here {
+    use super::*;
+    use server::plugin_lifecycle;
+
+    struct Fixture {
+        admin: String,
+        problem: i32,
+        contest: i32,
+    }
+
+    /// Replica `a` serves `server-plugin` and stores a config of it at every
+    /// scope; replica `b` has no plugin files at all.
+    async fn two_replicas() -> (TestApp, TestApp, Fixture, tempfile::TempDir) {
+        let a = TestApp::spawn_with_plugins().await;
+        let admin = a
+            .create_user_with_role("not_served_admin", "password123", "admin")
+            .await;
+        let problem = a.insert_public_problem("P").await;
+        let contest = a.create_contest(&admin, "C", true, true).await;
+        a.add_problem_to_contest(contest, problem, &admin).await;
+        for path in paths(problem, contest) {
+            let res = a
+                .put_with_token(&path, &json!({ "config": { "level": 1 } }), &admin)
+                .await;
+            assert_eq!(res.status, 200, "{path}: {}", res.text);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let b = a
+            .spawn_replica(SpawnOptions {
+                plugins_dir: Some(dir.path().to_path_buf()),
+                allow_plugin_activation_failures: true,
+                ..Default::default()
+            })
+            .await;
+        plugin_lifecycle::reconcile(&b.state).await.unwrap();
+        (
+            a,
+            b,
+            Fixture {
+                admin,
+                problem,
+                contest,
+            },
+            dir,
+        )
+    }
+
+    fn paths(problem: i32, contest: i32) -> [String; 4] {
+        [
+            routes::plugin_global_config_ns("server-plugin", "anywhere"),
+            routes::problem_config_ns(problem, "server-plugin", "anywhere"),
+            routes::contest_config_ns(contest, "server-plugin", "anywhere"),
+            routes::contest_problem_config_ns(contest, problem, "server-plugin", "anywhere"),
+        ]
+    }
+
+    fn refused_by_name(res: &crate::common::TestResponse, code: &str, what: &str) {
+        assert_eq!(res.status, 503, "{what}: {}", res.text);
+        assert_eq!(res.body["code"], code, "{what}: {}", res.text);
+        assert_eq!(
+            res.body["details"]["plugin_id"], "server-plugin",
+            "{what}: {}",
+            res.text
+        );
+        assert!(res.headers.contains_key("retry-after"), "{what}");
+    }
+
+    async fn stored(app: &TestApp) -> i64 {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        app.db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT count(*) AS n FROM plugin_config \
+                 WHERE namespace IN ('anywhere', 'server-plugin:anywhere')",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "n")
+            .unwrap()
+    }
+
+    /// Every route of every scope on `b` answers `code`, naming the plugin,
+    /// and leaves every stored row as it was. The issues routes answer it
+    /// too while the plugin is `enabled` (a disabled plugin checks nothing,
+    /// so it has no issues to tell).
+    async fn every_route_refuses(b: &TestApp, fx: &Fixture, code: &str, enabled: bool) {
+        let before = stored(b).await;
+        assert_eq!(before, 4);
+        for path in paths(fx.problem, fx.contest) {
+            let res = b.get_with_token(&path, &fx.admin).await;
+            refused_by_name(&res, code, &format!("GET {path}"));
+            let res = b
+                .put_with_token(&path, &json!({ "config": { "level": 2 } }), &fx.admin)
+                .await;
+            refused_by_name(&res, code, &format!("PUT {path}"));
+            let res = b.delete_with_token(&path, &fx.admin).await;
+            refused_by_name(&res, code, &format!("DELETE {path}"));
+        }
+        assert_eq!(stored(b).await, before, "no route changed a stored row");
+        let res = b
+            .get_with_token(&routes::plugin_global_config("server-plugin"), &fx.admin)
+            .await;
+        refused_by_name(&res, code, "the plugin's config list");
+        for path in [
+            format!("/api/v1/problems/{}/config/issues", fx.problem),
+            format!("/api/v1/contests/{}/config/issues", fx.contest),
+        ] {
+            let res = b.get_with_token(&path, &fx.admin).await;
+            if enabled {
+                refused_by_name(&res, code, &path);
+            } else {
+                assert_eq!(res.body, json!([]), "{path}: {}", res.text);
+            }
+        }
+
+        // A resource's list shows the plugin's stored row withheld, naming
+        // why, so the settings dialog says so in place of its tab.
+        for path in [
+            routes::problem_config(fx.problem),
+            routes::contest_config(fx.contest),
+            routes::contest_problem_config(fx.contest, fx.problem),
+        ] {
+            let res = b.get_with_token(&path, &fx.admin).await;
+            assert_eq!(res.status, 200, "{path}: {}", res.text);
+            let entry = res
+                .body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["plugin_id"] == "server-plugin" && e["namespace"] == "anywhere")
+                .unwrap_or_else(|| panic!("{path} lists the stored row: {}", res.text))
+                .clone();
+            assert_eq!(entry["config"], serde_json::Value::Null, "{path}: {entry}");
+            assert_eq!(entry["config_withheld"], true, "{path}: {entry}");
+            assert_eq!(entry["unavailable"], code, "{path}: {entry}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_replica_lacking_a_plugin_a_peer_serves_refuses_its_configs_by_name() {
+        let (_a, b, fx, _dir) = two_replicas().await;
+        every_route_refuses(&b, &fx, "PLUGIN_NOT_LOADED_HERE", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_disabled_plugin_refuses_its_configs_by_name() {
+        let (a, _b, fx, _dir) = two_replicas().await;
+        let res = a
+            .post_with_token(
+                &routes::admin_plugin_disable("server-plugin"),
+                &json!({}),
+                &fx.admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        every_route_refuses(&a, &fx, "PLUGIN_DISABLED", false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_no_server_loads_refuses_its_configs_by_name() {
+        let (a, b, fx, _dir) = two_replicas().await;
+        // The replica that served it stops: no live server loads it.
+        plugin_lifecycle::stop(&a.state).await;
+        server::plugin_fleet::retire(&b.db, &a.state.config.server.id)
+            .await
+            .unwrap();
+        plugin_lifecycle::reconcile(&b.state).await.unwrap();
+        every_route_refuses(&b, &fx, "PLUGIN_NOT_LOADED", true).await;
     }
 }
 

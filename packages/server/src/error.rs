@@ -712,9 +712,13 @@ impl From<PluginError> for AppError {
                 tracing::warn!("Plugin not found: {detail}");
                 AppError::NotFound(format!("Plugin '{detail}' not found"))
             }
+            // A plugin installed and not loaded here (between loads, or
+            // unloaded during the call) is out, never absent: where the
+            // caller holds the lifecycle it says why by name
+            // (`PluginLifecycle::outage`); here it is retried.
             PluginError::NotLoaded(detail) => {
                 tracing::warn!("Plugin not loaded: {detail}");
-                AppError::NotFound(format!("Plugin '{detail}' not found"))
+                AppError::PluginUnavailable
             }
             PluginError::NoRuntime(_) => {
                 tracing::warn!("Plugin not ready: {err}");

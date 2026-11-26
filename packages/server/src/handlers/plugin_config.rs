@@ -97,6 +97,12 @@ async fn list_config_inner<C: ConnectionTrait>(
     target: &ConfigTarget,
     available_schemas: &[AvailableSchema],
 ) -> Result<Json<Vec<PluginConfigResponse>>, AppError> {
+    // A plugin's own list is all of the plugin's: refused whole where it is
+    // not served. A resource's list shows each such plugin's stored rows
+    // withheld, with why.
+    if target.scope() == ConfigScope::Plugin {
+        schemas.served_here(target.ref_id())?;
+    }
     let rows = plugin_config::Entity::find()
         .filter(plugin_config::Column::Scope.eq(target.scope().as_str()))
         .filter(plugin_config::Column::RefId.eq(target.ref_id()))
@@ -125,11 +131,16 @@ async fn list_config_inner<C: ConnectionTrait>(
 
             let refs = secret_refs(&r.secret_refs);
             let shown = shown(schemas, &plugin_id, &namespace, r.config, &refs);
+            let unavailable = schemas
+                .served_here(&plugin_id)
+                .err()
+                .map(|not_served| not_served.code().as_str().to_string());
             PluginConfigResponse {
                 plugin_id,
                 namespace,
                 config: shown.config,
                 config_withheld: shown.withheld,
+                unavailable,
                 enabled: r.enabled,
                 position: r.position,
                 updated_at: Some(r.updated_at),
@@ -147,6 +158,7 @@ async fn list_config_inner<C: ConnectionTrait>(
                 namespace: schema.namespace.clone(),
                 config: serde_json::Value::Null,
                 config_withheld: false,
+                unavailable: None,
                 enabled: None,
                 position: 0,
                 updated_at: None,
@@ -351,7 +363,14 @@ pub async fn delete_plugin_global_config(
     validate_plugin_id(&plugin_id)?;
     validate_namespace(&namespace)?;
     let target = ConfigTarget::plugin(&plugin_id);
-    let change = delete_config(&state.db, &target, &plugin_id, &namespace).await?;
+    let change = delete_config(
+        &state.db,
+        SchemaSource::of(&state),
+        &target,
+        &plugin_id,
+        &namespace,
+    )
+    .await?;
     change
         .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
@@ -418,6 +437,7 @@ pub async fn list_problem_config_issues(
     let issues = config_issues(
         &state.db,
         &ConfigChecker::of(&state),
+        SchemaSource::of(&state),
         subject,
         Reads::Committed,
     )
@@ -590,7 +610,14 @@ pub async fn delete_problem_config(
     let txn = state.db.begin().await?;
     find_problem(&txn, problem_id).await?;
     let target = ConfigTarget::problem(problem_id);
-    let change = delete_config(&txn, &target, &plugin_id, &namespace).await?;
+    let change = delete_config(
+        &txn,
+        SchemaSource::of(&state),
+        &target,
+        &plugin_id,
+        &namespace,
+    )
+    .await?;
     txn.commit().await?;
     change
         .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
@@ -804,7 +831,14 @@ pub async fn delete_contest_problem_config(
     let txn = state.db.begin().await?;
     find_contest_problem(&txn, contest_id, problem_id).await?;
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
-    let change = delete_config(&txn, &target, &plugin_id, &namespace).await?;
+    let change = delete_config(
+        &txn,
+        SchemaSource::of(&state),
+        &target,
+        &plugin_id,
+        &namespace,
+    )
+    .await?;
     txn.commit().await?;
     change
         .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
@@ -868,6 +902,7 @@ pub async fn list_contest_config_issues(
     let issues = config_issues(
         &state.db,
         &ConfigChecker::of(&state),
+        SchemaSource::of(&state),
         Subject::Contest(contest_id),
         Reads::Committed,
     )
@@ -1040,7 +1075,14 @@ pub async fn delete_contest_config(
     let txn = state.db.begin().await?;
     find_contest(&txn, contest_id).await?;
     let target = ConfigTarget::contest(contest_id);
-    let change = delete_config(&txn, &target, &plugin_id, &namespace).await?;
+    let change = delete_config(
+        &txn,
+        SchemaSource::of(&state),
+        &target,
+        &plugin_id,
+        &namespace,
+    )
+    .await?;
     txn.commit().await?;
     change
         .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)

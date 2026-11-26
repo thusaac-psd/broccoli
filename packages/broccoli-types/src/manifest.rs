@@ -625,8 +625,9 @@ pub struct SetSecret {
     pub identity: Vec<SecretStep>,
 }
 
-/// The opaque ref of one stored secret: minted when a write stores a new
-/// value at `identity`, kept while the value stays. A read shows the ref in
+/// The opaque ref of one stored secret: minted each time a write sends a
+/// value for it at `identity`, kept while writes send the ref back. A read
+/// shows the ref in
 /// place of the value, and a write keeps the stored value only where it
 /// sends the ref back, so a secret is kept only for an item the writer
 /// read. A bundle carries the refs and never the values: an import keeps
@@ -803,8 +804,8 @@ enum Kept {
 
 /// The rule for one secret field of a write, at `key` of `fields`:
 ///
-/// - a string sets the secret; it keeps the stored ref when it is the
-///   stored value, else gets a new one from `mint`;
+/// - a string sets the secret, with a new ref from `mint` whatever its
+///   value: a ref never says whether a value is the stored one;
 /// - the ref a read showed (`{"$secret": "<ref>"}`) keeps the stored value,
 ///   only at the item the read showed it on and while that item still holds
 ///   it;
@@ -843,10 +844,7 @@ fn keep(
                 _ => Kept::NotStored,
             }
         }
-        Some(value) if !unset(value) => match at {
-            Some((stored, Some(id))) if stored == value => Kept::Ref(id.to_string()),
-            _ => Kept::Ref(mint()),
-        },
+        Some(value) if !unset(value) => Kept::Ref(mint()),
         _ => {
             fields.remove(key);
             if required {
@@ -981,6 +979,46 @@ impl ConfigNamespace {
         );
     }
 
+    /// The refs of `value` with one for each secret it holds a value for:
+    /// a stored secret's own ref in `refs`, else one from `mint`; `None`
+    /// when every set secret has one already. A set secret always has a
+    /// ref, so a read shows one a save sends back; a value stored before its
+    /// field was secret, or before refs were kept, gets its ref here.
+    pub fn ref_every_secret(
+        &self,
+        value: &serde_json::Value,
+        refs: &[SecretRef],
+        mint: &mut dyn FnMut() -> String,
+    ) -> Option<Vec<SecretRef>> {
+        let mut value = value.clone();
+        let mut complete = Vec::new();
+        let mut minted = false;
+        each_secret(
+            &self.properties,
+            &[],
+            &mut value,
+            "",
+            &mut Vec::new(),
+            &mut |_, identity, fields, key, _| {
+                if fields.get(key).is_none_or(unset) {
+                    return;
+                }
+                let id = match ref_at(refs, identity) {
+                    Some(id) if !id.is_empty() => id.to_string(),
+                    _ => {
+                        minted = true;
+                        mint()
+                    }
+                };
+                complete.push(SecretRef {
+                    identity: identity.to_vec(),
+                    id,
+                });
+            },
+        );
+        minted.then_some(complete)
+    }
+
     /// Applies the secret rule to each secret field of a value a client
     /// writes, against what is `stored`, and returns the refs of the
     /// secrets the value holds once written, or every field refused. An
@@ -988,8 +1026,8 @@ impl ConfigNamespace {
     /// that read the config writes it back unchanged whatever items it
     /// moved; a new item, or one renamed, holds no secret a read showed it.
     ///
-    /// A string sets a secret (keeping the stored ref when it is the stored
-    /// value, else a new one from `mint`); the ref a read showed
+    /// A string sets a secret, with a new ref from `mint` whatever its value;
+    /// the ref a read showed
     /// (`{"$secret": "<ref>"}`, [`SECRET_REF`]) keeps the stored value at
     /// that item while the item still holds it; `{"$clear": true}`
     /// ([`CLEAR_SECRET`]) clears it; no secret (`null`, `""`, or the field
@@ -1129,10 +1167,10 @@ pub struct SchemaProperty {
     pub unit: Option<String>,
     pub span: Option<u8>,
     /// The field holds a secret, such as a credential: the host never sends
-    /// its value back on any read, only whether it is set, and keeps the
-    /// stored value when a write sends `null` for it (see
-    /// [`ConfigNamespace::withhold_secrets`]). The JSON schema marks it
-    /// `writeOnly`.
+    /// its value back on any read, only its ref, and keeps the stored value
+    /// only for a write that sends that ref back (see
+    /// [`ConfigNamespace::show_secrets`], [`ConfigNamespace::keep_secrets`]).
+    /// The JSON schema marks it `writeOnly`.
     #[serde(default)]
     pub secret: bool,
     /// For an array of objects: the field of its items that names each one
@@ -1359,6 +1397,27 @@ mod tests {
     }
 
     #[test]
+    fn every_set_secret_gets_a_ref_and_one_that_has_its_own_keeps_it() {
+        let (config, _) = stored_pair();
+        let mut minted = 0;
+        let mut mint = || {
+            minted += 1;
+            format!("new{minted}")
+        };
+        assert_eq!(
+            stations().ref_every_secret(&config, &[secret_ref("beta", "rb")], &mut mint),
+            Some(vec![secret_ref("alpha", "new1"), secret_ref("beta", "rb")]),
+            "a secret stored without a ref gets one"
+        );
+        let (config, refs) = stored_pair();
+        assert_eq!(
+            stations().ref_every_secret(&config, &refs, &mut mint),
+            None,
+            "nothing to mint"
+        );
+    }
+
+    #[test]
     fn a_read_shows_each_set_secret_as_its_ref() {
         let (mut value, refs) = stored_pair();
         value["stations"]
@@ -1451,8 +1510,10 @@ mod tests {
         );
     }
 
+    /// A ref says nothing of the value: writing the stored value again gets
+    /// a new ref like any other, so no write can test a guess by the ref.
     #[test]
-    fn the_stored_value_written_again_keeps_its_ref_and_another_gets_a_new_one() {
+    fn every_string_a_write_sends_gets_a_new_ref_its_value_aside() {
         assert_eq!(
             kept(json!({"stations": [
                 {"name": "alpha", "token": "A"},
@@ -1463,7 +1524,7 @@ mod tests {
                     {"name": "alpha", "token": "A"},
                     {"name": "beta", "token": "B2"},
                 ]}),
-                vec![secret_ref("alpha", "ra"), secret_ref("beta", "new1")]
+                vec![secret_ref("alpha", "new1"), secret_ref("beta", "new2")]
             ))
         );
     }

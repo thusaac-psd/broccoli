@@ -95,7 +95,9 @@ BEGIN
   IF current_setting('broccoli.restoring', true) = 'on' THEN
     RETURN NULL;
   END IF;
-  IF TG_OP = 'UPDATE' AND to_jsonb(OLD) - 'updated_at' = to_jsonb(NEW) - 'updated_at' THEN
+  IF TG_OP = 'UPDATE'
+     AND to_jsonb(OLD) - 'updated_at' - 'secret_refs'
+         = to_jsonb(NEW) - 'updated_at' - 'secret_refs' THEN
     RETURN NULL;
   END IF;
   FOR changed IN

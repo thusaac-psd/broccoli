@@ -228,3 +228,36 @@ test('enum options read as their titles', async ({ page }) => {
     0,
   );
 });
+
+// A plugin this server does not serve keeps its place in a resource's
+// settings, saying why in place of its form, rather than vanishing.
+test('a plugin this server does not serve says why in place of its settings', async ({
+  page,
+}) => {
+  await mockApi(page, 'admin');
+  await page.route('**/api/v1/contests/1/config', (route) =>
+    route.fulfill({
+      json: [
+        {
+          plugin_id: 'print',
+          namespace: 'print',
+          config: null,
+          config_withheld: true,
+          unavailable: 'PLUGIN_NOT_LOADED_HERE',
+          enabled: null,
+          position: 0,
+          updated_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+    }),
+  );
+  await page.goto('/contests');
+  await page
+    .getByRole('row', { name: /Spring Training Contest 2026/ })
+    .getByRole('button', { name: 'Actions' })
+    .click();
+  await page.getByRole('menuitem', { name: 'Configure' }).click();
+  const notice = page.getByRole('dialog').getByRole('status');
+  await expect(notice).toContainText('print');
+  await expect(notice).not.toContainText('PLUGIN_NOT_LOADED_HERE');
+});

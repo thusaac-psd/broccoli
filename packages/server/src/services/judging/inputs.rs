@@ -95,8 +95,9 @@ END $$";
     /// input, the problem- or contest-problem-scoped config's problem, each
     /// problem of a contest-scoped config's contest, and every problem for a
     /// plugin-scoped one. A config of another namespace, or a rewrite that
-    /// changes only `updated_at` (a config saved as it was), changes nothing
-    /// judging reads, so it counts nothing.
+    /// changes only `updated_at` or `secret_refs` (a config saved as it was,
+    /// a stored secret given its ref), changes nothing judging reads, so it
+    /// counts nothing.
     ///
     /// A contest's problems are locked by id before they are counted, here
     /// and in [`CONTEST_FUNCTION`], so two statements that count on
@@ -112,7 +113,9 @@ BEGIN
   IF current_setting('broccoli.restoring', true) = 'on' THEN
     RETURN NULL;
   END IF;
-  IF TG_OP = 'UPDATE' AND to_jsonb(OLD) - 'updated_at' = to_jsonb(NEW) - 'updated_at' THEN
+  IF TG_OP = 'UPDATE'
+     AND to_jsonb(OLD) - 'updated_at' - 'secret_refs'
+         = to_jsonb(NEW) - 'updated_at' - 'secret_refs' THEN
     RETURN NULL;
   END IF;
   FOR changed IN
