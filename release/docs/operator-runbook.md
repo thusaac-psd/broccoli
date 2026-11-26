@@ -441,17 +441,59 @@ installer sets 500 too, and the development `docker-compose.yaml` 200.
 
 **Behind PgBouncer**
 
+The shipped installs talk to Postgres directly. A PgBouncer in front of it needs
+four things, all checked by `release/test/pgbouncer_boot_test.sh` against
+PgBouncer 1.26:
+
+1. **Session pooling** (`pool_mode = session`). The boot lock is a session
+   advisory lock, the claim loop listens on a channel and the driver prepares
+   its statements, none of which survive transaction pooling.
+2. **No startup options from the server.** Set
+   `database.statement_timeout_secs = 0` and `database.tcp_keepalives = false`
+   (see the configuration reference): every session the server opens, its pools,
+   the boot lock's and the bundle tool's, then sends none. PgBouncer refuses a
+   connection that sends one it does not know ("unsupported startup parameter in
+   options").
+3. **`ignore_startup_parameters = extra_float_digits`**, which the driver sends
+   on every connection. The `edoburu/pgbouncer` image sets this by default; a
+   hand-written `pgbouncer.ini` lists it.
+4. **A password lookup that covers the plugin roles.** The server gives each
+   plugin that uses SQL its own database role, with a password it generates, and
+   that role logs in through PgBouncer too, so no `auth_file` can list it.
+   PgBouncer looks it up with `auth_query`, run as its `auth_user`, the app
+   role; its default query reads `pg_authid`, which only a superuser may, so the
+   plugin fails to load with "bouncer config error". Run `user-lookup.sql`
+   (`release/pgbouncer/` in the repository, `pgbouncer/` in the airgap bundle)
+   once, as the superuser, in Broccoli's database:
+
+   ```bash
+   psql -v ON_ERROR_STOP=1 -v app=broccoli -U postgres -d broccoli \
+     -f pgbouncer/user-lookup.sql
+   ```
+
+   It creates `pgbouncer.user_lookup`, which only the app role may call and
+   which answers only for login roles that are not superusers. Then set:
+
+   ```ini
+   auth_type = scram-sha-256
+   auth_user = broccoli
+   auth_query = SELECT uname, phash FROM pgbouncer.user_lookup($1)
+   ```
+
+In session mode each client connection holds a server connection, so give
+PgBouncer room for the whole fleet: `default_pool_size` at least the most
+connections one role opens (the app role's share across every server, see
+Database connections above) and `max_client_conn` at least the fleet's total.
+
 A plugin statement that runs past its call's deadline is cut. Talking to
 Postgres directly, the server cuts it by closing its connection, which Postgres
 notices within 100 ms (`client_connection_check_interval`, which plugin SQL may
-not change). That needs startup options, and PgBouncer rejects them, so behind
-PgBouncer set `database.statement_timeout_secs = 0` and
-`database.tcp_keepalives = false` (see the configuration reference). The server
-then sends no startup options and cuts a statement by cancelling its backend
-instead (`pg_cancel_backend`, by the pid it read when it checked the connection
-out). It closes only when it sends startup options and a probe connection reads
-the check interval back as set, so a pooler that ignores the options is cut by
-cancelling too.
+not change). That needs a startup option, so behind PgBouncer, with none sent,
+the server cuts a statement by cancelling its backend instead
+(`pg_cancel_backend`, by the pid it read when it checked the connection out). It
+closes only when it sends startup options and a probe connection reads the check
+interval back as set, so a pooler that ignores the options is cut by cancelling
+too.
 
 **Sizing Redis memory**
 
