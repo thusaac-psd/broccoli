@@ -425,6 +425,9 @@ pub struct TestApp {
     /// Whether this app loaded the plugins; its replicas do the same.
     load_plugins: bool,
     server_handle: Option<tokio::task::JoinHandle<()>>,
+    /// This replica's heartbeat, which keeps its `plugin_replica` row live
+    /// as a running server's does; `None` when the test drives it itself.
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
     dispatcher: Option<server::dispatcher::Dispatcher>,
 }
 
@@ -432,6 +435,9 @@ impl Drop for TestApp {
     fn drop(&mut self) {
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
         }
         if let Some(mut dispatcher) = self.dispatcher.take() {
             dispatcher.abort();
@@ -554,6 +560,10 @@ pub struct SpawnOptions {
     /// Leave self-registration as a fresh install has it, closed. Otherwise
     /// it is opened, since most tests create their users by registering.
     pub registration_closed: bool,
+    /// Run no heartbeat for this replica: the test touches or ages its
+    /// `plugin_replica` row itself. Otherwise the row stays live for as long
+    /// as the app runs, as a running server's does.
+    pub no_heartbeat: bool,
     /// Give the host functions a pool of their own, as production does, so
     /// a test can take the database away from them alone
     /// ([`TestApp::host_db`]).
@@ -969,6 +979,8 @@ impl TestApp {
             }
         }
 
+        let heartbeat = (!options.no_heartbeat)
+            .then(|| tokio::spawn(server::plugin_lifecycle::heartbeat(state.clone())));
         let state_for_app = state.clone();
         let app = server::build_router(state).expect("router");
 
@@ -1000,6 +1012,7 @@ impl TestApp {
             database,
             plugin_cache,
             server_handle: Some(server_handle),
+            heartbeat,
             dispatcher,
             platform_clocks: Arc::new(std::sync::Mutex::new(vec![clock])),
             load_plugins,

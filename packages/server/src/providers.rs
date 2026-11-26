@@ -516,3 +516,46 @@ fn loads(kind: Provided, key: &str, provider: &str, loaded: &str) -> String {
         field = field(kind),
     )
 }
+
+/// The keys of one kind a request may name ([`crate::state::AppState::known_keys`]):
+/// those a provider can run now (`open`) and those whose plugins are out
+/// (`closed`, [`crate::plugin_lifecycle::PluginLifecycle::key_closure`]).
+/// Work naming a closed key is refused by why, never as unknown; a refusal of
+/// an unknown key lists the two apart, so no closed key reads as supported.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KnownKeys {
+    pub open: std::collections::BTreeSet<String>,
+    pub closed: std::collections::BTreeSet<String>,
+}
+
+impl KnownKeys {
+    pub fn contains(&self, key: &str) -> bool {
+        self.open.contains(key) || self.closed.contains(key)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.open.is_empty() && self.closed.is_empty()
+    }
+
+    /// The keys as a refusal lists them: the open ones, then the closed
+    /// ones as closed.
+    pub fn listed(&self) -> String {
+        let open: Vec<&str> = self.open.iter().map(String::as_str).collect();
+        let mut listed = open.join(", ");
+        if !self.closed.is_empty() {
+            let closed: Vec<&str> = self.closed.iter().map(String::as_str).collect();
+            listed.push_str(&format!(" (closed now: {})", closed.join(", ")));
+        }
+        listed
+    }
+}
+
+/// Keys that are all open.
+impl<S: Into<String>> FromIterator<S> for KnownKeys {
+    fn from_iter<I: IntoIterator<Item = S>>(keys: I) -> Self {
+        Self {
+            open: keys.into_iter().map(Into::into).collect(),
+            closed: Default::default(),
+        }
+    }
+}

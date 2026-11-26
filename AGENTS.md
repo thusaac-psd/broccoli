@@ -380,17 +380,21 @@ binaries warn about every key they do not read.
   SQL), through `providers::resolve`, so every replica runs a key on the same
   plugin and a replica that lacks that plugin never falls back to another.
   Register and resolve through these, never through a map of your own.
-- A server is ready (`/readyz`, the probe the shipped gateways health-check)
-  unless a peer with a fresh heartbeat (`plugin_fleet::PEER_FRESH_SECS`) serves
-  every enabled plugin it serves and more, of any kind: one rule,
-  `PluginLifecycle::ready_among` on the one "missing here while a peer serves
-  it" predicate, `PluginLifecycle::missing_here_served_by_peer`, over the one
-  fleet read, `plugin_fleet::live_loaded`. Admission reads the same predicate
-  over the same fresh peers (`PluginLifecycle::missing_here`, the
-  `PLUGIN_NOT_LOADED_HERE` branch of `PluginLifecycle::outage`), and the admin
-  system overview shows each server's verdict and what it lacks through it;
-  `/readyz` names no plugin. `/livez` is liveness and `/healthz` the deep check
-  for monitoring; no gateway probe makes a dependency call.
+- A server is ready (`/readyz`, the probe the shipped gateways health-check) by
+  one decision over the fleet, `fleet_decision::Decision`, over each live
+  server's latest report (`plugin_fleet::live_loaded`, live within the one
+  window `plugin_fleet::LIVE_WINDOW_SECS`): a server serves a plugin only in its
+  published version (`loaded`, not an outdated or mismatched copy), its absence
+  counts only once it has applied the plugin's newest publish, and it is unready
+  while it lacks an enabled plugin another server serves; when that leaves none
+  ready, the one serving the most plugins, then the least id, stays ready.
+  Admission reads the same decision (`PluginLifecycle::outage`):
+  `PLUGIN_NOT_LOADED_HERE` only while a ready server serves the plugin, the
+  fleet's `PLUGIN_NOT_LOADED` while none does; every path that needs a plugin
+  here asks `PluginLifecycle::served_here`; the admin system overview shows each
+  server's verdict, what it lacks, and a mixed fleet as misconfigured; `/readyz`
+  names no plugin. `/livez` is liveness and `/healthz` the deep check for
+  monitoring; no gateway probe makes a dependency call.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.

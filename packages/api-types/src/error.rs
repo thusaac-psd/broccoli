@@ -52,7 +52,8 @@ macro_rules! host_codes {
         /// describes by its kind and the server's detail. A code marked
         /// `names_plugin` is about one plugin: its answer names it in
         /// `details.plugin_id`, and its text says it as `{plugin}`, which a
-        /// client fills with the plugin's name.
+        /// client fills with the plugin's name. A code marked `retryable` is
+        /// a designed state answered with `Retry-After`, never a failure.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         pub enum HostCode {
             $(
@@ -88,11 +89,27 @@ macro_rules! host_codes {
                     $(Self::$variant => host_codes!(@has names_plugin; $($flag)*),)*
                 }
             }
+
+            /// Whether an answer with this code is a state the platform is
+            /// designed to be in for a while (an outage, a plugin out, a
+            /// queue full), answered with `Retry-After` and served again once
+            /// it passes: never the host failing.
+            pub const fn is_retryable(self) -> bool {
+                match self {
+                    $(Self::$variant => host_codes!(@has retryable; $($flag)*),)*
+                }
+            }
+
+            /// The code `code` is sent as, if it is a host code.
+            pub fn of(code: &str) -> Option<HostCode> {
+                Self::ALL.iter().copied().find(|c| c.as_str() == code)
+            }
         }
     };
     (@has $want:ident;) => { false };
     (@has generic; generic $($rest:ident)*) => { true };
     (@has names_plugin; names_plugin $($rest:ident)*) => { true };
+    (@has retryable; retryable $($rest:ident)*) => { true };
     (@has $want:ident; $other:ident $($rest:ident)*) => {
         host_codes!(@has $want; $($rest)*)
     };
@@ -124,22 +141,22 @@ host_codes! {
     PluginNotReady = "PLUGIN_NOT_READY";
     PluginLoadFailed = "PLUGIN_LOAD_FAILED";
     PluginUploadDisabled = "PLUGIN_UPLOAD_DISABLED";
-    RateLimited = "RATE_LIMITED";
+    RateLimited = "RATE_LIMITED", retryable;
     CheckerSourceUnsupported = "CHECKER_SOURCE_UNSUPPORTED";
     ContestTypeLocked = "CONTEST_TYPE_LOCKED";
-    ContestTypeUnavailable = "CONTEST_TYPE_UNAVAILABLE";
-    ContestTypeDisabled = "CONTEST_TYPE_DISABLED", names_plugin;
-    QueueOverloaded = "QUEUE_OVERLOADED";
-    PluginUnavailable = "PLUGIN_UNAVAILABLE";
-    PluginDisabled = "PLUGIN_DISABLED", names_plugin;
-    StorageUnavailable = "STORAGE_UNAVAILABLE";
+    ContestTypeUnavailable = "CONTEST_TYPE_UNAVAILABLE", retryable;
+    ContestTypeDisabled = "CONTEST_TYPE_DISABLED", names_plugin, retryable;
+    QueueOverloaded = "QUEUE_OVERLOADED", retryable;
+    PluginUnavailable = "PLUGIN_UNAVAILABLE", retryable;
+    PluginDisabled = "PLUGIN_DISABLED", names_plugin, retryable;
+    StorageUnavailable = "STORAGE_UNAVAILABLE", retryable;
     /// The server's database cannot be reached or cannot serve connections.
-    DatabaseUnavailable = "DATABASE_UNAVAILABLE";
+    DatabaseUnavailable = "DATABASE_UNAVAILABLE", retryable;
     /// The server's database answers, but every connection the server keeps
     /// to it was in use: the server is busy, not down.
-    DatabaseBusy = "DATABASE_BUSY";
+    DatabaseBusy = "DATABASE_BUSY", retryable;
     /// The server's message queue (Redis) cannot be reached.
-    QueueUnavailable = "QUEUE_UNAVAILABLE";
+    QueueUnavailable = "QUEUE_UNAVAILABLE", retryable;
     /// A plugin hook refused the request without a code of its own.
     PluginRejected = "PLUGIN_REJECTED";
     IdempotencyKeyInProgress = "IDEMPOTENCY_KEY_IN_PROGRESS";
@@ -179,20 +196,20 @@ host_codes! {
     /// live replica, but not loaded on this one: a request is retried once
     /// the gateway moves it to a replica that serves the plugin, and work
     /// this replica took goes back to the queue.
-    PluginNotLoadedHere = "PLUGIN_NOT_LOADED_HERE", names_plugin;
+    PluginNotLoadedHere = "PLUGIN_NOT_LOADED_HERE", names_plugin, retryable;
     /// No enabled plugin provides a key the work needs (its contest type,
     /// problem type, checker format or language), and the replica that took
     /// it had none loaded: no replica will ever run it, so it stands.
     NoProvider = "NO_PROVIDER";
     /// A plugin the request needs is enabled and loaded on no live replica:
     /// what it provides waits for a replica to load it; retried.
-    PluginNotLoaded = "PLUGIN_NOT_LOADED", names_plugin;
+    PluginNotLoaded = "PLUGIN_NOT_LOADED", names_plugin, retryable;
     /// This server does not run a plugin at the version the fleet published
     /// (it still runs the previous one, or files that are not the published
     /// ones), so it writes none of that plugin's configs: the schema it
     /// knows may not mark the published one's secrets. Retried once the
     /// server loads the published version.
-    PluginOutdatedHere = "PLUGIN_OUTDATED_HERE", names_plugin;
+    PluginOutdatedHere = "PLUGIN_OUTDATED_HERE", names_plugin, retryable;
     /// The problem's checker program failed.
     CheckerFailed = "CHECKER_FAILED";
     /// A program the problem supplies besides its checker (an interactor or

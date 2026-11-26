@@ -4,7 +4,7 @@ use axum_typed_multipart::{TryFromField, TryFromMultipart};
 use chrono::{DateTime, Utc};
 use sea_orm::DerivePartialModel;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::error::AppError;
 use crate::utils::filename::validate_flat_filename;
@@ -324,15 +324,17 @@ pub async fn validate_key(
 }
 
 /// Check that `value` is one of `known`, listing them when it is not.
-pub fn check_known_key(field: &str, value: &str, known: &HashSet<String>) -> Result<(), AppError> {
+pub fn check_known_key(
+    field: &str,
+    value: &str,
+    known: &crate::providers::KnownKeys,
+) -> Result<(), AppError> {
     if known.contains(value) {
         return Ok(());
     }
-    let mut valid: Vec<&str> = known.iter().map(String::as_str).collect();
-    valid.sort_unstable();
     Err(AppError::Validation(format!(
         "{field} must be one of: {}",
-        valid.join(", ")
+        known.listed()
     )))
 }
 
@@ -442,7 +444,7 @@ pub fn validate_update_problem(req: &UpdateProblemRequest) -> Result<(), AppErro
 /// Ids or filenames that only differ by padding are rejected as duplicates.
 pub fn parse_submission_format(
     submission_format: &HashMap<String, Vec<String>>,
-    known_languages: &HashSet<String>,
+    known_languages: &crate::providers::KnownKeys,
 ) -> Result<HashMap<String, Vec<String>>, AppError> {
     let mut parsed = HashMap::with_capacity(submission_format.len());
     for (language_id, filenames) in submission_format {
@@ -619,9 +621,8 @@ mod checker_format_tests {
 
     #[test]
     fn a_known_key_validates_and_an_unknown_one_lists_the_known() {
-        let known: HashSet<String> = ["exact", "tokens", "testlib", "none"]
-            .map(String::from)
-            .into();
+        let known: crate::providers::KnownKeys =
+            ["exact", "tokens", "testlib", "none"].into_iter().collect();
         for fmt in ["exact", "tokens", "testlib", "none"] {
             assert!(
                 check_known_key("checker_format", fmt, &known).is_ok(),
@@ -647,7 +648,7 @@ mod parse_tests {
     #[test]
     fn parsed_submission_format_is_the_normalised_value() {
         let raw = HashMap::from([(" cpp ".to_string(), vec![" solution.cpp".to_string()])]);
-        let parsed = parse_submission_format(&raw, &HashSet::new()).unwrap();
+        let parsed = parse_submission_format(&raw, &Default::default()).unwrap();
         assert_eq!(
             parsed,
             HashMap::from([("cpp".to_string(), vec!["solution.cpp".to_string()])])
@@ -660,12 +661,12 @@ mod parse_tests {
             "cpp".to_string(),
             vec!["a.cpp".to_string(), " a.cpp".to_string()],
         )]);
-        assert!(parse_submission_format(&raw, &HashSet::new()).is_err());
+        assert!(parse_submission_format(&raw, &Default::default()).is_err());
         let raw = HashMap::from([
             ("cpp".to_string(), vec!["a.cpp".to_string()]),
             ("cpp ".to_string(), vec!["b.cpp".to_string()]),
         ]);
-        assert!(parse_submission_format(&raw, &HashSet::new()).is_err());
+        assert!(parse_submission_format(&raw, &Default::default()).is_err());
     }
 
     #[test]

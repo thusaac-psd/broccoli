@@ -55,7 +55,7 @@ pub fn validate_submission_contract(
     files: &[SubmissionFileDto],
     language: &str,
     submission_format: Option<HashMap<String, Vec<String>>>,
-    known_languages: &HashSet<String>,
+    known_languages: &crate::providers::KnownKeys,
 ) -> Result<(), AppError> {
     let language = language.trim();
 
@@ -127,22 +127,23 @@ pub fn files_from_json(value: &serde_json::Value) -> Vec<SubmissionFileDto> {
 
 pub fn validate_run_language(
     language: &str,
-    known_languages: &HashSet<String>,
+    known_languages: &crate::providers::KnownKeys,
 ) -> Result<(), AppError> {
     check_known_language(language.trim(), known_languages)
 }
 
 /// Refuse a language no plugin registered, naming the ones that are, so a
 /// client can show the choice. An empty registry checks nothing.
-fn check_known_language(language: &str, known_languages: &HashSet<String>) -> Result<(), AppError> {
+fn check_known_language(
+    language: &str,
+    known_languages: &crate::providers::KnownKeys,
+) -> Result<(), AppError> {
     if known_languages.is_empty() || known_languages.contains(language) {
         return Ok(());
     }
-    let mut known: Vec<&str> = known_languages.iter().map(String::as_str).collect();
-    known.sort_unstable();
     Err(AppError::Validation(format!(
         "Unsupported language: {language}. Supported languages: {}",
-        known.join(", ")
+        known_languages.listed()
     )))
 }
 
@@ -150,8 +151,8 @@ fn check_known_language(language: &str, known_languages: &HashSet<String>) -> Re
 mod tests {
     use super::*;
 
-    fn known_languages() -> HashSet<String> {
-        HashSet::from(["cpp".to_string(), "c".to_string(), "python3".to_string()])
+    fn known_languages() -> crate::providers::KnownKeys {
+        ["cpp", "c", "python3"].into_iter().collect()
     }
 
     #[test]
@@ -163,6 +164,26 @@ mod tests {
             ),
             other => panic!("expected a validation error, got {other:?}"),
         }
+    }
+
+    /// A language whose plugin is out is known, but never listed as
+    /// supported: the refusal says it is closed.
+    #[test]
+    fn an_unsupported_language_lists_closed_ones_apart() {
+        let mut known = known_languages();
+        known.open.remove("python3");
+        known.closed.insert("python3".into());
+        match validate_run_language("ruby", &known) {
+            Err(AppError::Validation(message)) => assert_eq!(
+                message,
+                "Unsupported language: ruby. Supported languages: c, cpp (closed now: python3)"
+            ),
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+        assert!(
+            validate_run_language("python3", &known).is_ok(),
+            "known, refused later by why"
+        );
     }
 
     #[test]
@@ -288,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_validate_run_language_empty_set_allows_any() {
-        let languages = HashSet::new();
+        let languages = crate::providers::KnownKeys::default();
         assert!(validate_run_language("anything", &languages).is_ok());
     }
 

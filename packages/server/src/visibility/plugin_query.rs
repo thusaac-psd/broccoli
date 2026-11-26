@@ -118,6 +118,12 @@ struct Blind {
     /// Resources in contests of these types (the contest types the missing
     /// plugins registered when they last loaded anywhere).
     types: std::collections::BTreeMap<String, PluginOutage>,
+    /// Of `types`, those a missing plugin governs that another replica, or
+    /// this one once it loads, enforces ([`PluginOutage::enforced_elsewhere`]),
+    /// with that plugin's outage: they blind what is read outside their
+    /// contests too. A plugin disabled or loaded nowhere is enforced by no
+    /// replica, so it governs only what is read through its own contests.
+    enforced: std::collections::BTreeMap<String, PluginOutage>,
     /// Every resource: a missing plugin's scope is unknown, or it governs
     /// more than its contest types (it registered none).
     everything: Option<PluginOutage>,
@@ -139,6 +145,11 @@ impl Blind {
             None => worst(&mut self.everything),
             Some(types) => {
                 for t in types {
+                    if outage.enforced_elsewhere() {
+                        let mut slot = self.enforced.remove(&t);
+                        worst(&mut slot);
+                        self.enforced.extend(slot.map(|o| (t.clone(), o)));
+                    }
                     let mut slot = self.types.remove(&t);
                     worst(&mut slot);
                     self.types.extend(slot.map(|o| (t, o)));
@@ -304,9 +315,13 @@ pub(super) fn scoped_querier_loaded(state: &AppState) -> bool {
 /// - with a contest (`resource_contests`): that contest's type;
 /// - a problem, sample or attachment reached outside a contest, or a
 ///   submission outside a contest: the contests its problem belongs to, but
-///   only for a plugin that is enabled and missing here, since every other
-///   replica still enforces it wherever the problem is read. A disabled
-///   plugin governs only what is read through its own contests;
+///   only for a plugin some replica enforces (`Blind::enforced`: another
+///   replica serves it, or this one is loading it), which enforces it
+///   wherever the problem is read. A plugin disabled or loaded nowhere is
+///   enforced nowhere, so it governs only what is read through its own
+///   contests. A practice submission is judged under its problem's own
+///   default contest type, so submitting outside a contest is never blind
+///   to another contest's type;
 /// - a plugin that governs everything: everything.
 ///
 /// One small query per kind present, made only while a visibility plugin is
@@ -314,6 +329,7 @@ pub(super) fn scoped_querier_loaded(state: &AppState) -> bool {
 async fn blind_outages(
     state: &AppState,
     blind: &Blind,
+    action: Action,
     resources: &[Resource],
     resource_contests: &[ResourceContest],
 ) -> Result<Vec<Option<PluginOutage>>, AppError> {
@@ -325,12 +341,7 @@ async fn blind_outages(
         return Ok(outages);
     }
     let all_types: Vec<String> = blind.types.keys().cloned().collect();
-    let enabled_types: Vec<String> = blind
-        .types
-        .iter()
-        .filter(|(_, o)| !matches!(o, PluginOutage::Disabled { .. }))
-        .map(|(t, _)| t.clone())
-        .collect();
+    let enforced_types: Vec<String> = blind.enforced.keys().cloned().collect();
     let mut contests = Vec::new();
     let mut problems = Vec::new();
     let mut submissions = Vec::new();
@@ -339,6 +350,7 @@ async fn blind_outages(
             (_, r) if !r.degrades_in_outage() => {}
             (Some(c), _) => contests.push(*c),
             (None, Resource::Submission(id)) => submissions.push(*id),
+            (None, _) if action == Action::Submit => {}
             (None, r) => problems.extend(r.wire_problem_id()),
         }
     }
@@ -378,7 +390,7 @@ async fn blind_outages(
            JOIN contest c ON c.id = cp.contest_id \
           WHERE cp.problem_id = ANY($1) AND c.contest_type = ANY($2)",
         problems,
-        &enabled_types,
+        &enforced_types,
     )
     .await?;
     let submissions = typed(
@@ -387,19 +399,24 @@ async fn blind_outages(
            JOIN contest c ON c.id = cp.contest_id \
           WHERE s.id = ANY($1) AND c.contest_type = ANY($2)",
         submissions,
-        &enabled_types,
+        &enforced_types,
     )
     .await?;
     for ((outage, resource), contest) in outages.iter_mut().zip(resources).zip(resource_contests) {
         if !resource.degrades_in_outage() {
             continue;
         }
-        let contest_type = match (&contest.id, resource) {
-            (Some(c), _) => contests.get(c),
-            (None, Resource::Submission(id)) => submissions.get(id),
-            (None, r) => r.wire_problem_id().and_then(|p| problems.get(&p)),
+        let by_type = match (&contest.id, resource) {
+            (Some(c), _) => contests.get(c).and_then(|t| blind.types.get(t)),
+            (None, Resource::Submission(id)) => {
+                submissions.get(id).and_then(|t| blind.enforced.get(t))
+            }
+            (None, r) => r
+                .wire_problem_id()
+                .and_then(|p| problems.get(&p))
+                .and_then(|t| blind.enforced.get(t)),
         };
-        if let Some(by_type) = contest_type.and_then(|t| blind.types.get(t)) {
+        if let Some(by_type) = by_type {
             *outage = Some(match outage.take() {
                 Some(current) => current.worst(by_type.clone()),
                 None => by_type.clone(),
@@ -614,7 +631,7 @@ pub(crate) async fn query_plugins(
     let mut outages = if blind.is_empty() {
         vec![None; resources.len()]
     } else {
-        blind_outages(state, &blind, resources, resource_contests).await?
+        blind_outages(state, &blind, action, resources, resource_contests).await?
     };
 
     if queriers.is_empty() {

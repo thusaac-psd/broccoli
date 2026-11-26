@@ -4633,14 +4633,16 @@ export interface components {
     /** @description One server's readiness, with the reason `GET /readyz` leaves out. */
     ServerReadiness: {
       /**
-       * @description The enabled plugins it does not serve while another server does,
-       *     sorted. Not empty while it is not ready; it can be non-empty on a
-       *     ready server that serves a plugin the others lack.
+       * @description The enabled plugins it does not serve in their published version
+       *     while another server does, sorted, leaving out those whose newest
+       *     publish it is still applying. Not empty while it is not ready; it can
+       *     be non-empty on the server a mixed fleet keeps ready.
        */
       missing: string[];
       /**
-       * @description Whether it passes `GET /readyz`: no other server serves every
-       *     enabled plugin it serves and more.
+       * @description Whether it passes `GET /readyz`: it lacks no enabled plugin another
+       *     server serves, or, in a fleet where every server lacks one, it is
+       *     the one kept ready (the most plugins served, then the least id).
        */
       ready: boolean;
       server_id: string;
@@ -4986,11 +4988,17 @@ export interface components {
       /** @description Queue depths; empty while the queue is unreachable. */
       queues: components['schemas']['QueueInfo'][];
       /**
-       * @description Each server with a fresh heartbeat, by id: whether it is ready
-       *     (`GET /readyz`) and the plugins it lacks while another serves them,
-       *     as each last reported.
+       * @description Each live server, by id: whether it is ready (`GET /readyz`) and the
+       *     plugins it lacks while another serves them, as each last reported.
        */
       servers: components['schemas']['ServerReadiness'][];
+      /**
+       * @description Whether the servers serve different enabled plugins in their
+       *     published versions, once each has applied the newest publish: a
+       *     misconfigured fleet, since a browser pinned to one server loses what
+       *     it lacks.
+       */
+      servers_mixed: boolean;
       /**
        * Format: int64
        * @description Submissions being judged: claimed and not finished (Pending,
