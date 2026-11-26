@@ -41,6 +41,10 @@ pub struct EvalOutcome {
 struct IoiJudge {
     all_test_cases: Vec<TestCaseRow>,
     subtask_defs: Vec<SubtaskDef>,
+    /// Which subtasks count each case, over all the problem's test cases as
+    /// scoring resolves members: what each row records and what the
+    /// short-circuit follows read this one membership.
+    counting: Counting,
     short_circuit: SubtaskShortCircuit,
 }
 
@@ -53,7 +57,7 @@ impl ContestJudge for IoiJudge {
         // Weight the case's raw 0..1 score by its point value. A case that
         // counts toward no subtask (a sample, unless a subtask names it)
         // adds nothing to the total, so its row records nothing either.
-        if !self.short_circuit.counting.counts(tc.id) {
+        if !self.counting.counts(tc.id) {
             return 0.0;
         }
         round_score(outcome.score * tc.score)
@@ -67,9 +71,12 @@ impl ContestJudge for IoiJudge {
         // be re-cancelled.
         let already_recorded: HashSet<i32> =
             progress.outcomes.iter().map(|o| o.test_case_id).collect();
-        let cancel_ids =
-            self.short_circuit
-                .cancellable_after(last.test_case_id, last.score, &already_recorded);
+        let cancel_ids = self.short_circuit.cancellable_after(
+            &self.counting,
+            last.test_case_id,
+            last.score,
+            &already_recorded,
+        );
         if cancel_ids.is_empty() {
             // The driver keeps refilling while any case is unjudged, so an
             // unrelated pending subtask is never stranded.
@@ -132,13 +139,15 @@ pub fn evaluate_all_detached(
     scoring_test_cases: &[TestCaseRow],
     _submission_id: i32,
     subtask_defs: &[SubtaskDef],
+    counting: &Counting,
 ) -> Result<OnSubmissionOutput, SdkError> {
     let policy = IoiJudge {
         // Scoring reads only id / score / is_sample. The policy rides the
         // session state on every callback, so it must not carry bodies.
         all_test_cases: all_test_cases.iter().map(without_bodies).collect(),
         subtask_defs: subtask_defs.to_vec(),
-        short_circuit: SubtaskShortCircuit::new(subtask_defs, scoring_test_cases),
+        counting: counting.clone(),
+        short_circuit: SubtaskShortCircuit::new(subtask_defs, counting, scoring_test_cases),
     };
     DetachedEval::start(
         host,
@@ -180,7 +189,6 @@ fn normalize_raw_score(score: f64) -> f64 {
 struct SubtaskShortCircuit {
     methods: Vec<SubtaskScoringMethod>,
     subtask_cases: Vec<HashSet<i32>>,
-    counting: Counting,
     failed_subtasks: HashSet<usize>,
     active_cases: HashSet<i32>,
     sample_cases: HashSet<i32>,
@@ -188,8 +196,9 @@ struct SubtaskShortCircuit {
 }
 
 impl SubtaskShortCircuit {
-    fn new(subtask_defs: &[SubtaskDef], test_cases: &[TestCaseRow]) -> Self {
-        let counting = Counting::new(subtask_defs, test_cases);
+    /// Tracks the judged `test_cases`, each counted toward the subtasks
+    /// `counting` says.
+    fn new(subtask_defs: &[SubtaskDef], counting: &Counting, test_cases: &[TestCaseRow]) -> Self {
         let mut subtask_cases = vec![HashSet::new(); subtask_defs.len()];
         for tc in test_cases {
             for &subtask_idx in counting.subtasks_of(tc.id) {
@@ -200,7 +209,6 @@ impl SubtaskShortCircuit {
         Self {
             methods: subtask_defs.iter().map(|def| def.scoring_method).collect(),
             subtask_cases,
-            counting,
             failed_subtasks: HashSet::new(),
             active_cases: test_cases.iter().map(|tc| tc.id).collect(),
             sample_cases: test_cases
@@ -214,19 +222,20 @@ impl SubtaskShortCircuit {
 
     fn cancellable_after(
         &mut self,
+        counting: &Counting,
         test_case_id: i32,
         raw_score: f64,
         already_recorded: &HashSet<i32>,
     ) -> Vec<i32> {
         self.active_cases.remove(&test_case_id);
-        let failing_subtasks = self.failing_subtasks_for(test_case_id, raw_score);
+        let failing_subtasks = self.failing_subtasks_for(counting, test_case_id, raw_score);
         if failing_subtasks.is_empty() {
             return Vec::new();
         }
 
         self.failed_subtasks.extend(failing_subtasks);
 
-        self.cancellable_cases_for_failure(test_case_id, &self.failed_subtasks)
+        self.cancellable_cases_for_failure(counting, test_case_id, &self.failed_subtasks)
             .into_iter()
             .filter(|id| !already_recorded.contains(id))
             .collect::<Vec<_>>()
@@ -240,11 +249,11 @@ impl SubtaskShortCircuit {
 
     fn cancellable_cases_for_failure(
         &self,
+        counting: &Counting,
         failed_test_case_id: i32,
         failed_subtasks: &HashSet<usize>,
     ) -> Vec<i32> {
-        let newly_failed_cases = self
-            .counting
+        let newly_failed_cases = counting
             .subtasks_of(failed_test_case_id)
             .iter()
             .filter(|subtask_idx| self.method_can_short_circuit(**subtask_idx))
@@ -258,25 +267,35 @@ impl SubtaskShortCircuit {
             .filter(|id| !self.sample_cases.contains(id))
             .filter(|id| newly_failed_cases.contains(id))
             .filter(|id| {
-                self.case_is_only_needed_by_failed_short_circuit_subtasks(*id, failed_subtasks)
+                self.case_is_only_needed_by_failed_short_circuit_subtasks(
+                    counting,
+                    *id,
+                    failed_subtasks,
+                )
             })
             .collect()
     }
 
     fn case_is_only_needed_by_failed_short_circuit_subtasks(
         &self,
+        counting: &Counting,
         test_case_id: i32,
         failed_subtasks: &HashSet<usize>,
     ) -> bool {
-        let subtasks = self.counting.subtasks_of(test_case_id);
+        let subtasks = counting.subtasks_of(test_case_id);
         !subtasks.is_empty()
             && subtasks.iter().all(|subtask_idx| {
                 self.method_can_short_circuit(*subtask_idx) && failed_subtasks.contains(subtask_idx)
             })
     }
 
-    fn failing_subtasks_for(&self, test_case_id: i32, raw_score: f64) -> HashSet<usize> {
-        self.counting
+    fn failing_subtasks_for(
+        &self,
+        counting: &Counting,
+        test_case_id: i32,
+        raw_score: f64,
+    ) -> HashSet<usize> {
+        counting
             .subtasks_of(test_case_id)
             .iter()
             .copied()
@@ -375,7 +394,16 @@ mod tests {
         results: Vec<TestCaseVerdict>,
     ) -> Vec<DetachedEvaluateCallbackOutput> {
         let req = test_submission(tcs.to_vec());
-        evaluate_all_detached(host, &req, tcs, tcs, req.submission_id, subtasks).unwrap();
+        evaluate_all_detached(
+            host,
+            &req,
+            tcs,
+            tcs,
+            req.submission_id,
+            subtasks,
+            &Counting::new(subtasks, tcs),
+        )
+        .unwrap();
         let mut state = host.eval.detached_windowed_requests()[0].state.clone();
         let total = tcs.len();
         results
@@ -416,7 +444,16 @@ mod tests {
         let host = Host::mock();
         let tcs = (1..=10).map(test_case).collect::<Vec<_>>();
         let req = test_submission(tcs.clone());
-        evaluate_all_detached(&host, &req, &tcs, &tcs, req.submission_id, &[]).unwrap();
+        evaluate_all_detached(
+            &host,
+            &req,
+            &tcs,
+            &tcs,
+            req.submission_id,
+            &[],
+            &Counting::new(&[], &tcs),
+        )
+        .unwrap();
         assert_eq!(host.eval.detached_windowed_requests()[0].concurrency, 4);
     }
 
@@ -581,7 +618,16 @@ mod tests {
             },
         ];
 
-        evaluate_all_detached(&host, &req, &tcs, &tcs, req.submission_id, &subtasks).unwrap();
+        evaluate_all_detached(
+            &host,
+            &req,
+            &tcs,
+            &tcs,
+            req.submission_id,
+            &subtasks,
+            &Counting::new(&subtasks, &tcs),
+        )
+        .unwrap();
         let detached = host.eval.detached_windowed_requests();
         assert_eq!(detached.len(), 1);
         assert_eq!(
@@ -699,7 +745,16 @@ mod tests {
             },
         ];
 
-        evaluate_all_detached(&host, &req, &tcs, &tcs, req.submission_id, &subtasks).unwrap();
+        evaluate_all_detached(
+            &host,
+            &req,
+            &tcs,
+            &tcs,
+            req.submission_id,
+            &subtasks,
+            &Counting::new(&subtasks, &tcs),
+        )
+        .unwrap();
         let detached = host.eval.detached_windowed_requests();
         assert_eq!(detached.len(), 1);
 
@@ -803,7 +858,16 @@ mod stored_ratio_tests {
         results: Vec<TestCaseVerdict>,
     ) -> (f64, CaseRatios, Vec<SubtaskScoreDetail>) {
         let req = test_submission(tcs.to_vec());
-        evaluate_all_detached(host, &req, tcs, tcs, req.submission_id, subtasks).unwrap();
+        evaluate_all_detached(
+            host,
+            &req,
+            tcs,
+            tcs,
+            req.submission_id,
+            subtasks,
+            &Counting::new(subtasks, tcs),
+        )
+        .unwrap();
         let mut state = host.eval.detached_windowed_requests()[0].state.clone();
         let total = results.len();
         for (i, result) in results.into_iter().enumerate() {

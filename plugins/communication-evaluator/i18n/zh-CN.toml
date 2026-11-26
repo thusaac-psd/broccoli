@@ -1,3 +1,4 @@
+'identifier.problemType.communication' = '通信题'
 'plugin.communication-evaluator.name' = '交互题评测'
 'plugin.communication-evaluator.description' = '评测通信题：管理程序与选手进程通过管道交互（与 CMS 相同）。'
 

@@ -402,6 +402,11 @@ impl E2eTestApp {
             .collect()
     }
 
+    /// The in-process server's state, for a test that reads what it loaded.
+    pub fn state(&self) -> &AppState {
+        self.state.as_ref().expect("the in-process server's state")
+    }
+
     /// Takes a sample burst on the in-process server's platform clock, as
     /// its resample timer does.
     pub async fn resample_clock(&self) {

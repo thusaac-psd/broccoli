@@ -173,7 +173,11 @@ closed until you assign a new future time. It never silently shifts its clock.
 A delayed or duplicate timer keeps the stage's schedule when prerequisites
 were satisfied at the configured instant. A game that opens late, because the
 server was unavailable at its start, runs its full duration from the moment it
-opens, so players never lose game time. Opened stages stay disabled in the editor.
+opens, so players never lose game time. Each match of a stage opens at its own moment, so
+after an outage the matches of one stage can open seconds apart. Every pair
+gets the full game, and a problem is visible to a pair only once their own match
+opens the game that plays it. A pair whose match opens later still sees each
+problem later than a pair that started first, by however long the delay was. Opened stages stay disabled in the editor.
 If a stage opens while you are editing, the server rejects changes to it.
 
 The setup API accepts the same edits through the complete setup request. Use

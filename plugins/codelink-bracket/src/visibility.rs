@@ -806,6 +806,76 @@ mod tests {
         );
     }
 
+    /// Every match of a stage plays the stage's problems, and each opens its
+    /// first game at its own tick. A problem becomes visible to a player only
+    /// once their own match opens the game that plays it: a match that
+    /// opened first shows it to its pair while a match still preparing shows
+    /// it to nobody.
+    #[test]
+    fn a_stage_problem_is_visible_to_a_pair_only_once_their_own_match_opens() {
+        let setup = crate::model::Setup {
+            seeds: vec![10, 20, 30, 40],
+            rounds: vec![round_def()],
+            ..Default::default()
+        };
+        let opened = MatchState {
+            round: 1,
+            pos: 0,
+            player_a: 10,
+            player_b: 20,
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![101, 102, 103]),
+            order_b: Some(vec![201, 202, 203]),
+            phase: Phase::Playing,
+            xiaoju: vec![crate::model::XiaojuState {
+                index: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let preparing = MatchState {
+            pos: 1,
+            player_a: 30,
+            player_b: 40,
+            phase: Phase::Preparing,
+            xiaoju: vec![],
+            ..opened.clone()
+        };
+        let setups = HashMap::from([(7, setup)]);
+        let decide = |matches: &HashMap<i32, Vec<(u8, MatchState)>>, viewer: i32| {
+            decide_problem_for_contest(7, 101, viewer, &setups, matches)
+        };
+
+        let matches = HashMap::from([(7, vec![(0, opened.clone()), (1, preparing.clone())])]);
+        assert_eq!(decide(&matches, 10), WireDecision::Allow {});
+        for viewer in [20, 30, 40] {
+            assert_eq!(
+                decide(&matches, viewer),
+                WireDecision::Deny {},
+                "viewer {viewer}"
+            );
+        }
+
+        // Once the second match opens its first game, its owner sees it too.
+        let matches = HashMap::from([(
+            7,
+            vec![
+                (0, opened.clone()),
+                (
+                    1,
+                    MatchState {
+                        phase: Phase::Playing,
+                        xiaoju: opened.xiaoju.clone(),
+                        ..preparing
+                    },
+                ),
+            ],
+        )]);
+        assert_eq!(decide(&matches, 30), WireDecision::Allow {});
+        assert_eq!(decide(&matches, 40), WireDecision::Deny {});
+    }
+
     #[test]
     fn decide_visibility_resolves_the_asymmetric_case_end_to_end() {
         // The same wire-level check as the pure-function test above, but
