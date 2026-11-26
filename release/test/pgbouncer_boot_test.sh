@@ -116,7 +116,8 @@ healthy() {
 }
 if ! wait_for 120 healthy; then
   kill -0 "$pid" 2>/dev/null || echo "the server exited"
-  tail -n 40 "$T/server.log"
+  # The log without backtrace frames, so the error itself shows.
+  grep -vE '^ +([0-9]+: | at )' "$T/server.log" | tail -n 20 || true
   fail "the server did not come up healthy behind PgBouncer"
 fi
 grep -q '"Opened the plugin'"'"'s SQL pool","plugin_id":"print"' "$T/server.log" \
