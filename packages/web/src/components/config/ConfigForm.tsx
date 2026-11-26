@@ -13,6 +13,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { RecordLoader } from '@/components/RecordLoader';
 
 import { SchemaFields } from './SchemaFields';
+import { StoredValues } from './stored-values';
 import type {
   ConfigScope,
   FieldProblem,
@@ -278,115 +279,117 @@ function ConfigFormFields({
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-5">
-      {schema.description && (
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          {pluginId
-            ? pluginText(
-                pluginKeys.configDescription(pluginId, schema.namespace),
-                schema.description,
-              )
-            : schema.description}
-        </p>
-      )}
+    <StoredValues value={storedValues}>
+      <form onSubmit={handleSubmit} className="space-y-5">
+        {schema.description && (
+          <p className="text-sm text-muted-foreground leading-relaxed">
+            {pluginId
+              ? pluginText(
+                  pluginKeys.configDescription(pluginId, schema.namespace),
+                  schema.description,
+                )
+              : schema.description}
+          </p>
+        )}
 
-      {pluginId && (
-        <Slot
-          name={`config.form.${pluginId}.${schema.namespace}`}
-          as="div"
-          slotProps={{
-            scope,
-            pluginId,
-            namespace: schema.namespace,
-            values: unmarked(values),
-            storedValues: unmarked(storedValues),
-            schema: jsonSchema,
-            isUsingDefaultsOnly,
-            inherited,
-            hasExplicitValue: (path: string | string[]) =>
-              isExplicitValue(Array.isArray(path) ? path : [path]),
-          }}
-        />
-      )}
+        {pluginId && (
+          <Slot
+            name={`config.form.${pluginId}.${schema.namespace}`}
+            as="div"
+            slotProps={{
+              scope,
+              pluginId,
+              namespace: schema.namespace,
+              values: unmarked(values),
+              storedValues: unmarked(storedValues),
+              schema: jsonSchema,
+              isUsingDefaultsOnly,
+              inherited,
+              hasExplicitValue: (path: string | string[]) =>
+                isExplicitValue(Array.isArray(path) ? path : [path]),
+            }}
+          />
+        )}
 
-      {isUsingDefaultsOnly && (
-        <div className="rounded-lg border border-dashed bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
-          {t('plugins.config.unsetNotice')}
+        {isUsingDefaultsOnly && (
+          <div className="rounded-lg border border-dashed bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+            {t('plugins.config.unsetNotice')}
+          </div>
+        )}
+
+        <div className="space-y-5">
+          <SchemaFields
+            schema={jsonSchema}
+            values={values}
+            rootValues={values}
+            path={[]}
+            updateValue={updateValue}
+            errors={errors}
+            pluginId={pluginId}
+            namespace={schema.namespace}
+            scope={scope}
+            isExplicitValue={isExplicitValue}
+            hasExplicitDescendant={hasExplicitDescendant}
+            isDirty={isDirty}
+            inherited={inherited}
+          />
         </div>
-      )}
 
-      <div className="space-y-5">
-        <SchemaFields
-          schema={jsonSchema}
-          values={values}
-          rootValues={values}
-          path={[]}
-          updateValue={updateValue}
-          errors={errors}
-          pluginId={pluginId}
-          namespace={schema.namespace}
-          scope={scope}
-          isExplicitValue={isExplicitValue}
-          hasExplicitDescendant={hasExplicitDescendant}
-          isDirty={isDirty}
-          inherited={inherited}
-        />
-      </div>
-
-      {message && (
-        <div
-          className={`rounded-lg px-4 py-3 text-sm ${
-            message.type === 'success'
-              ? 'bg-green-500/10 text-green-600 dark:text-green-400 border border-green-500/20'
-              : 'bg-destructive/10 text-destructive border border-destructive/20'
-          }`}
-        >
-          {message.text}
-          {message.fields && message.fields.length > 0 && (
-            <ul className="mt-1 list-disc pl-5">
-              {message.fields.map(([path, problem]) => (
-                <li key={path}>
-                  {path ? (
-                    <span className="font-medium">{fieldName(path)}</span>
-                  ) : null}
-                  {path ? ': ' : null}
-                  {problemText(problem)}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-
-      <SheetFooter className="gap-2 sm:gap-0 pt-2">
-        <div className="flex gap-2 mr-auto">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleReset}
-            disabled={loading}
+        {message && (
+          <div
+            className={`rounded-lg px-4 py-3 text-sm ${
+              message.type === 'success'
+                ? 'bg-green-500/10 text-green-600 dark:text-green-400 border border-green-500/20'
+                : 'bg-destructive/10 text-destructive border border-destructive/20'
+            }`}
           >
-            <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
-            {t('plugins.config.defaults')}
+            {message.text}
+            {message.fields && message.fields.length > 0 && (
+              <ul className="mt-1 list-disc pl-5">
+                {message.fields.map(([path, problem]) => (
+                  <li key={path}>
+                    {path ? (
+                      <span className="font-medium">{fieldName(path)}</span>
+                    ) : null}
+                    {path ? ': ' : null}
+                    {problemText(problem)}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        <SheetFooter className="gap-2 sm:gap-0 pt-2">
+          <div className="flex gap-2 mr-auto">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleReset}
+              disabled={loading}
+            >
+              <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+              {t('plugins.config.defaults')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleDelete}
+              disabled={loading}
+              className="text-destructive hover:text-destructive"
+              title={t('plugins.config.deleteHint')}
+            >
+              <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+              {t('plugins.config.delete')}
+            </Button>
+          </div>
+          <Button type="submit" disabled={loading}>
+            {loading ? t('plugins.config.saving') : t('plugins.config.save')}
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleDelete}
-            disabled={loading}
-            className="text-destructive hover:text-destructive"
-            title={t('plugins.config.deleteHint')}
-          >
-            <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-            {t('plugins.config.delete')}
-          </Button>
-        </div>
-        <Button type="submit" disabled={loading}>
-          {loading ? t('plugins.config.saving') : t('plugins.config.save')}
-        </Button>
-      </SheetFooter>
-    </form>
+        </SheetFooter>
+      </form>
+    </StoredValues>
   );
 }

@@ -162,6 +162,24 @@ test('a kept secret stays on its station through delete, add and reorder', async
   });
 });
 
+// The stored secret an emptied input keeps is its own item's, wherever the
+// item moved since the form loaded.
+test("an emptied secret input keeps its own station's secret after rows move", async ({
+  page,
+}) => {
+  const { dialog, saves } = await openStations(page);
+  const beta = dialog.locator('#cfg-stations-1-token');
+  await beta.fill('typed');
+  await dialog.getByRole('button', { name: 'Remove' }).first().click();
+  await expect(dialog.locator('#cfg-stations-0-name')).toHaveValue('beta');
+  await dialog.locator('#cfg-stations-0-token').fill('');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0]).toEqual({
+    stations: [{ name: 'beta', token: { $secret: 'rb' } }],
+  });
+});
+
 // Typing over a stored secret and emptying the input again keeps it.
 test('an emptied secret input keeps the stored secret', async ({ page }) => {
   const { dialog, saves } = await openStations(page);

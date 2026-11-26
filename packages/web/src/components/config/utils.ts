@@ -442,6 +442,37 @@ export function isSecretRef(value: unknown): value is ApiSchemas['KeptSecret'] {
   );
 }
 
+/**
+ * The ref the stored secret at `path` of the form's `values` reads as, found
+ * in `stored` by identity: each item of a keyed array by the key it was
+ * saved under (`SAVED`), never by its row, so a field keeps its own item's
+ * secret wherever the item moved. `null` for an item added since the form
+ * read the config, or a secret none is stored for.
+ */
+export function storedRef(
+  stored: unknown,
+  values: unknown,
+  path: readonly string[],
+): ApiSchemas['KeptSecret'] | null {
+  let at: unknown = stored;
+  let value: unknown = values;
+  for (const segment of path) {
+    if (Array.isArray(value)) {
+      const item: unknown = value[Number(segment)];
+      const saved = isRecord(item) ? item[SAVED] : undefined;
+      if (saved === undefined || !Array.isArray(at)) return null;
+      at = at.find(
+        (candidate) => isRecord(candidate) && candidate[SAVED] === saved,
+      );
+      value = item;
+    } else {
+      at = isRecord(at) ? at[segment] : undefined;
+      value = isRecord(value) ? value[segment] : undefined;
+    }
+  }
+  return isSecretRef(at) ? at : null;
+}
+
 /** Whether a secret field holds a value typed into the form. */
 function isEntered(value: unknown): boolean {
   return typeof value === 'string' && value !== '';
